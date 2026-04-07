@@ -3,6 +3,7 @@
 CreditSense ML Pipeline — CLI entry point.
 
 Usage:
+    python main.py --mode eda
     python main.py --mode train --task classification
     python main.py --mode train --task regression
     python main.py --mode cv --task classification
@@ -20,6 +21,12 @@ from configs import Config, TaskType
 from utils.logger import setup_logger
 
 logger = setup_logger("main")
+
+
+def run_eda(config: Config):
+    """Run exploratory data analysis with visualizations."""
+    from data_exploration import run_eda as _run_eda
+    _run_eda(config)
 
 
 def run_train(config: Config):
@@ -110,7 +117,7 @@ def main():
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["train", "cv", "tune", "predict", "submit"],
+        choices=["eda", "train", "cv", "tune", "predict", "submit"],
         help="Pipeline mode",
     )
     parser.add_argument(
@@ -134,7 +141,10 @@ def main():
     logger.info("=" * 60)
 
     try:
-        if args.mode == "train":
+        if args.mode == "eda":
+            run_eda(config)
+
+        elif args.mode == "train":
             run_train(config)
 
         elif args.mode == "cv":
