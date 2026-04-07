@@ -12,18 +12,10 @@ pip install -r requirements.txt
 
 把 `credit_train.csv` 和 `credit_test.csv` 放到 `data/` 目录下。
 
-## 第一步：跑 EDA
-
-```bash
-python main.py --mode eda
-```
-
-会在 `outputs/eda/` 下生成 59 张图（缺失值、目标分布、每列直方图/箱线图/条形图、相关性热力图）。先看一遍数据再动手。
-
 ## 使用
 
 ```bash
-# EDA（先跑这个）
+# EDA
 python main.py --mode eda
 
 # 训练
