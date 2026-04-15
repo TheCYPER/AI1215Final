@@ -16,7 +16,10 @@ from sklearn.utils.class_weight import compute_sample_weight
 
 from configs.config import Config, TaskType
 from data_cleaning.column_types import infer_column_types
-from feature_engineering.preprocessor import build_preprocessor
+from feature_engineering.preprocessor import (
+    build_preprocessor,
+    get_categorical_feature_indices,
+)
 from modeling import model_factory
 from utils.metrics import (
     compute_classification_metrics,
@@ -55,6 +58,8 @@ class CrossValidator:
             freq_encoding_cols=self.config.features.freq_encoding_cols,
             log_transform_cols=self.config.features.log_transform_cols,
             enable_credit_features=self.config.features.enable_credit_features,
+            target_encoding_cols=self.config.features.target_encoding_cols,
+            native_categorical=self.config.features.native_categorical_for_lgbm,
         )
 
     def _get_splitter(self):
@@ -85,6 +90,7 @@ class CrossValidator:
         preprocessor = self._build_preprocessor(X_train)
         X_train_t = preprocessor.fit_transform(X_train, y_train)
         X_val_t = preprocessor.transform(X_val)
+        cat_indices = get_categorical_feature_indices(preprocessor)
 
         # Fresh model per fold
         model = model_factory(self.config)
@@ -102,6 +108,8 @@ class CrossValidator:
             fit_kwargs["sample_weight"] = sample_weight
         if self.config.training.use_early_stopping:
             fit_kwargs["eval_set"] = [(X_val_t, y_val.values)]
+        if cat_indices:
+            fit_kwargs["categorical_feature"] = cat_indices
 
         model.fit(X_train_t, y_train.values, **fit_kwargs)
 

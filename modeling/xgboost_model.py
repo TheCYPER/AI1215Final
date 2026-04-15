@@ -35,7 +35,9 @@ class XGBoostModel(BaseModel):
             self.model_ = XGBRegressor(**params)
         return self
 
-    def fit(self, X, y, eval_set=None, sample_weight=None, **kwargs):
+    def fit(self, X, y, eval_set=None, sample_weight=None, categorical_feature=None, **kwargs):
+        # categorical_feature accepted but ignored: XGBoost doesn't support native
+        # categorical handling the same way LightGBM does.
         fit_params = {}
         if sample_weight is not None:
             fit_params["sample_weight"] = sample_weight

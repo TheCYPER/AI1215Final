@@ -11,27 +11,64 @@ from typing import Dict, Type
 
 from configs.config import Config, TaskType
 from modeling.base_model import BaseModel
+from modeling.catboost_model import CatBoostModel
+from modeling.ensemble_model import EnsembleModel
+from modeling.lightgbm_model import LightGBMModel
 from modeling.xgboost_model import XGBoostModel
+from modeling.xgboost_ordinal import XGBoostOrdinalModel
 
 # Register all available models here
 MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
     "xgboost": XGBoostModel,
-    # "lightgbm": LightGBMModel,  # uncomment when implemented
-    # "catboost": CatBoostModel,
-    # "ensemble": EnsembleModel,
+    "xgboost_ordinal": XGBoostOrdinalModel,
+    "lightgbm": LightGBMModel,
+    "catboost": CatBoostModel,
+    "ensemble": EnsembleModel,
 }
 
 
 def model_factory(config: Config) -> BaseModel:
-    """
-    Create and build a model based on config.
+    """Create and build a model based on config.
 
-    Reads task_type and model_type from config, looks up the registry,
-    instantiates with the correct params, and calls build_model().
+    For the "ensemble" model_type, recursively builds each component and
+    injects the list of base models into the EnsembleModel wrapper.
     """
     task_type = config.training.task_type
     model_type = config.get_model_type()
-    params = config.get_model_params()
+
+    if model_type == "ensemble":
+        spec = config.get_model_params()  # {"components": [...], "weights": ...}
+        base_models: list = []
+        for comp in spec["components"]:
+            # Normalize: bare string → {"type": <str>, "overrides": {}}
+            if isinstance(comp, str):
+                comp_type, overrides = comp, {}
+            else:
+                comp_type = comp["type"]
+                overrides = comp.get("overrides", {})
+            if comp_type not in MODEL_REGISTRY or comp_type == "ensemble":
+                raise ValueError(f"Invalid ensemble component: {comp_type}")
+            base_params = config.get_component_params(comp_type)
+            merged = {**base_params, **overrides}
+            comp_cls = MODEL_REGISTRY[comp_type]
+            comp_model = comp_cls(config=merged, task_type=task_type)
+            if task_type == TaskType.CLASSIFICATION:
+                comp_model.build_model(num_classes=config.training.n_classes)
+            else:
+                comp_model.build_model()
+            base_models.append(comp_model)
+        ensemble = EnsembleModel(
+            task_type=task_type,
+            base_models=base_models,
+            weights=spec.get("weights"),
+            mode=spec.get("mode", "uniform"),
+            meta_learner_type=spec.get("meta_learner_type", "logreg"),
+        )
+        if task_type == TaskType.CLASSIFICATION:
+            ensemble.build_model(num_classes=config.training.n_classes)
+        else:
+            ensemble.build_model()
+        return ensemble
 
     if model_type not in MODEL_REGISTRY:
         available = ", ".join(MODEL_REGISTRY.keys())
@@ -39,14 +76,13 @@ def model_factory(config: Config) -> BaseModel:
             f"Unknown model '{model_type}'. Available: {available}"
         )
 
+    params = config.get_model_params()
     model_cls = MODEL_REGISTRY[model_type]
     model = model_cls(config=params, task_type=task_type)
-
     if task_type == TaskType.CLASSIFICATION:
         model.build_model(num_classes=config.training.n_classes)
     else:
         model.build_model()
-
     return model
 
 

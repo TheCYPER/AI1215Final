@@ -5,10 +5,170 @@ All hyperparameters, column definitions, and paths in one place.
 Change model type or params here — the entire pipeline follows.
 """
 
+import random as _random
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def random_catboost_components(n: int, seed: int = 42) -> List[Dict[str, Any]]:
+    """Generate N CatBoost ensemble components with random hyperparameter overrides.
+
+    Diversity levers chosen for actual decorrelation (not just cosmetic):
+    - `rsm` (column subsample): each model sees a different feature subset, the
+      Random-Forest-style mechanism for breaking error correlation.
+    - `subsample` (row subsample): each model sees a different row subset.
+    - `random_strength`: CatBoost-internal noise injection during split scoring,
+      pushes different models toward different splits.
+    - `depth`, `learning_rate`, `l2_leaf_reg`: capacity and regularization spread.
+    - `random_seed`: distinct per model so internal randomness differs even with
+      identical other params.
+    """
+    rng = _random.Random(seed)
+    components = []
+    for i in range(n):
+        overrides = {
+            "depth": rng.choice([4, 5, 6, 7, 8, 9, 10]),
+            "learning_rate": round(rng.uniform(0.02, 0.12), 4),
+            "l2_leaf_reg": round(rng.uniform(1.0, 20.0), 2),
+            "subsample": round(rng.uniform(0.5, 1.0), 3),
+            "rsm": round(rng.uniform(0.5, 1.0), 3),
+            "random_strength": round(rng.uniform(0.5, 5.0), 2),
+            "random_seed": 100 + i,
+        }
+        components.append({"type": "catboost", "overrides": overrides})
+    return components
+
+
+# Centers found by our two widened-tune runs; used by cluster_catboost_variants.
+_TPE_CENTER = {
+    "depth": 6,
+    "learning_rate": 0.0407,
+    "l2_leaf_reg": 140.23,
+    "subsample": 0.9646,
+    "rsm": 0.894,
+    "random_strength": 5.52,
+    "border_count": 60,
+    "leaf_estimation_iterations": 29,
+}
+
+_RANDOM_CENTER = {
+    "depth": 4,
+    "learning_rate": 0.0826,
+    "l2_leaf_reg": 44.77,
+    "subsample": 0.968,
+    "rsm": 0.848,
+    "random_strength": 8.59,
+    "border_count": 53,
+    "leaf_estimation_iterations": 13,
+}
+
+
+def cluster_catboost_variants(
+    center: Dict[str, Any],
+    n: int,
+    jitter_pct: float = 0.2,
+    seed: int = 42,
+    seed_offset: int = 200,
+    iter_cap: int = 1000,
+) -> List[Dict[str, Any]]:
+    """Generate N CatBoost configs clustered around `center` with ±jitter_pct noise.
+
+    Integer params jitter ±round(jitter_pct * center). Float params multiply by
+    1 + uniform(-jitter_pct, jitter_pct). iterations is forced to `iter_cap`
+    (stacking bases should not vary in training budget — fair comparison).
+    """
+    # Params that CatBoost constrains to the (0, 1] interval — jitter can push
+    # them over 1.0 which triggers a hard error in CatBoost's param validator.
+    UNIT_INTERVAL_KEYS = {"subsample", "rsm"}
+
+    rng = _random.Random(seed)
+    components = []
+    for i in range(n):
+        overrides: Dict[str, Any] = {}
+        for key, val in center.items():
+            if isinstance(val, int):
+                jitter = max(1, int(abs(val) * jitter_pct))
+                overrides[key] = max(1, val + rng.randint(-jitter, jitter))
+            elif isinstance(val, float):
+                factor = 1.0 + rng.uniform(-jitter_pct, jitter_pct)
+                candidate = val * factor
+                if key in UNIT_INTERVAL_KEYS:
+                    candidate = min(1.0, max(0.05, candidate))
+                elif candidate <= 0:  # never let regularization / lr go non-positive
+                    candidate = abs(val * 0.1)
+                overrides[key] = round(candidate, 4)
+        overrides["iterations"] = iter_cap
+        overrides["random_seed"] = seed_offset + i
+        components.append({"type": "catboost", "overrides": overrides})
+    return components
+
+
+def middle_catboost_variants(
+    n: int,
+    seed: int = 300,
+    seed_offset: int = 300,
+    iter_cap: int = 1000,
+) -> List[Dict[str, Any]]:
+    """Moderate-region CatBoost configs that avoid both known optima's extremes.
+
+    Depth 5–8, l2_leaf_reg 5–30 (not TPE's 140, not Random's 45 extremes),
+    lr 0.04–0.12, random_strength 1–5, rsm 0.7–0.95.
+    """
+    rng = _random.Random(seed)
+    components = []
+    for i in range(n):
+        overrides = {
+            "depth": rng.choice([5, 6, 7, 8]),
+            "learning_rate": round(rng.uniform(0.04, 0.12), 4),
+            "l2_leaf_reg": round(rng.uniform(5.0, 30.0), 2),
+            "subsample": round(rng.uniform(0.7, 0.95), 3),
+            "rsm": round(rng.uniform(0.7, 0.95), 3),
+            "random_strength": round(rng.uniform(1.0, 5.0), 2),
+            "border_count": rng.randint(40, 180),
+            "leaf_estimation_iterations": rng.randint(5, 20),
+            "iterations": iter_cap,
+            "random_seed": seed_offset + i,
+        }
+        components.append({"type": "catboost", "overrides": overrides})
+    return components
+
+
+def diverse_catboost_components(
+    n_per_cluster: int,
+    seed_base: int = 42,
+    iter_cap: int = 1000,
+) -> List[Dict[str, Any]]:
+    """TPE-cluster + Random-cluster + middle-cluster, each of size n_per_cluster.
+
+    Used as base models for stacking ensembles that span multiple optima regions
+    found during CatBoost tuning runs.
+    """
+    return (
+        cluster_catboost_variants(
+            _TPE_CENTER,
+            n=n_per_cluster,
+            jitter_pct=0.2,
+            seed=seed_base,
+            seed_offset=200,
+            iter_cap=iter_cap,
+        )
+        + cluster_catboost_variants(
+            _RANDOM_CENTER,
+            n=n_per_cluster,
+            jitter_pct=0.2,
+            seed=seed_base + 100,
+            seed_offset=200 + n_per_cluster,
+            iter_cap=iter_cap,
+        )
+        + middle_catboost_variants(
+            n=n_per_cluster,
+            seed=seed_base + 200,
+            seed_offset=200 + 2 * n_per_cluster,
+            iter_cap=iter_cap,
+        )
+    )
 
 
 class TaskType(str, Enum):
@@ -69,8 +229,33 @@ class ColumnConfig:
 @dataclass
 class ModelConfig:
     """Model selection and hyperparameters for both tasks."""
-    clf_model_type: str = "xgboost"
+    clf_model_type: str = "ensemble"
     reg_model_type: str = "xgboost"
+
+    # Ensemble composition (only used when *_model_type == "ensemble").
+    #
+    # Each component is either:
+    #   - a string (the model_type name, no overrides), or
+    #   - a dict {"type": "<name>", "overrides": {...params to layer on base}}
+    #
+    # The same model_type can appear multiple times with different overrides
+    # — that's the "simple MoE" pattern: N variants of one architecture for
+    # decorrelated-error variance reduction.
+    #
+    # weights=None means uniform.
+    ensemble_clf_components: List[Any] = field(
+        default_factory=lambda: diverse_catboost_components(n_per_cluster=10)
+    )
+    ensemble_clf_weights: Optional[List[float]] = None
+    # Combination mode: "uniform" / "weighted" / "stacking".
+    ensemble_clf_mode: str = "stacking"
+    # Meta learner for stacking mode (LogReg default; Ridge for regression).
+    ensemble_meta_learner_type: str = "logreg"
+    ensemble_reg_components: List[Any] = field(
+        default_factory=lambda: ["xgboost", "lightgbm", "catboost"]
+    )
+    ensemble_reg_weights: Optional[List[float]] = None
+    ensemble_reg_mode: str = "uniform"
 
     # -- XGBoost classification --
     xgb_clf_params: Dict[str, Any] = field(default_factory=lambda: {
@@ -106,21 +291,78 @@ class ModelConfig:
         "n_jobs": -1,
     })
 
-    # -- LightGBM classification (placeholder for teammates) --
+    # -- XGBoost ordinal-regression classifier --
+    # Treats ordered class labels as continuous, rounds+clips at predict time.
+    # Objective fixed to reg:squarederror internally.
+    xgb_ordinal_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "objective": "reg:pseudohubererror",
+        "huber_slope": 1.0,
+        "n_estimators": 500,
+        "learning_rate": 0.05,
+        "max_depth": 5,
+        "min_child_weight": 5,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "reg_lambda": 5.0,
+        "reg_alpha": 1.0,
+        "random_state": 42,
+        "eval_metric": "mphe",
+        "tree_method": "hist",
+        "n_jobs": -1,
+    })
+
+    # -- CatBoost classification --
+    # Params updated 2026-04-15 from Optuna TPE+Hyperband on widened-v2 space
+    # (best_score 3-fold 0.8209, 60/60 trials). TPE converged to "moderate depth
+    # + extreme regularization + many Newton steps" — a different region from
+    # Random's shallow+strong-reg optimum. leaf_estimation_iterations hit upper
+    # bound 30, suggesting further widening there may still help marginally.
+    cat_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "iterations": 1781,
+        "learning_rate": 0.0407,
+        "depth": 6,
+        "l2_leaf_reg": 140.23,
+        "subsample": 0.9646,
+        "rsm": 0.894,
+        "random_strength": 5.52,
+        "border_count": 60,
+        "leaf_estimation_iterations": 29,
+        "random_seed": 42,
+        "thread_count": -1,
+        "early_stopping_rounds": 50,
+        "bootstrap_type": "Bernoulli",
+    })
+
+    # -- CatBoost regression --
+    cat_reg_params: Dict[str, Any] = field(default_factory=lambda: {
+        "iterations": 1000,
+        "learning_rate": 0.05,
+        "depth": 6,
+        "l2_leaf_reg": 5.0,
+        "random_seed": 42,
+        "thread_count": -1,
+        "early_stopping_rounds": 50,
+        "bootstrap_type": "Bernoulli",
+        "subsample": 0.8,
+    })
+
+    # -- LightGBM classification --
     lgbm_clf_params: Dict[str, Any] = field(default_factory=lambda: {
         "objective": "multiclass",
-        "n_estimators": 500,
+        "n_estimators": 1000,
         "learning_rate": 0.05,
         "max_depth": 7,
         "num_leaves": 63,
         "min_child_samples": 20,
         "subsample": 0.8,
+        "subsample_freq": 1,  # required for `subsample` to actually trigger; default 0 means bagging disabled
         "colsample_bytree": 0.8,
         "reg_alpha": 1.0,
         "reg_lambda": 5.0,
         "random_state": 42,
         "verbosity": -1,
         "n_jobs": -1,
+        "early_stopping_rounds": 50,
     })
 
     # -- LightGBM regression (placeholder) --
@@ -147,6 +389,14 @@ class FeatureEngineeringConfig:
     # High-cardinality columns -> frequency encoding
     freq_encoding_cols: List[str] = field(default_factory=lambda: ["State"])
 
+    # Mid-cardinality columns that additionally get target encoding
+    # (stacked on top of the native-categorical path — both encodings coexist).
+    target_encoding_cols: List[str] = field(default_factory=lambda: [
+        "JobCategory",
+        "EmployerType",
+        "LoanPurpose",
+    ])
+
     # Columns to log-transform (skewed financial data)
     log_transform_cols: List[str] = field(default_factory=lambda: [
         "AnnualIncome",
@@ -158,6 +408,11 @@ class FeatureEngineeringConfig:
 
     # Enable domain credit features
     enable_credit_features: bool = True
+
+    # Use LGBM-native categorical handling (ordinal-encoded, passed via
+    # `categorical_feature`) instead of one-hot expansion. Cats in
+    # `freq_encoding_cols` still use frequency encoding.
+    native_categorical_for_lgbm: bool = True
 
 
 @dataclass
@@ -187,10 +442,12 @@ class TrainingConfig:
 @dataclass
 class HyperparameterTuningConfig:
     """Hyperparameter tuning configuration."""
-    n_trials: int = 50
-    cv_folds: int = 5
-    timeout: Optional[int] = 3600
+    n_trials: int = 60
+    cv_folds: int = 3  # lighter than final-eval CV (5); pick strong params, not final score
+    timeout: Optional[int] = None  # no cap — let all n_trials finish
 
+    # XGBoost search spaces (legacy names `clf_search_space` / `reg_search_space` kept
+    # so external callers still work; dispatched via Config.get_search_space below).
     clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
         "learning_rate": (0.01, 0.3),
         "max_depth": (3, 10),
@@ -209,6 +466,58 @@ class HyperparameterTuningConfig:
         "colsample_bytree": (0.3, 1.0),
         "reg_alpha": (0, 10),
         "reg_lambda": (0, 20),
+    })
+
+    # LightGBM-specific search spaces. Different from XGBoost because leaf-wise
+    # growth makes `num_leaves` and `min_child_samples` the primary capacity /
+    # overfit controls, not `max_depth` + `min_child_weight`.
+    lgbm_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "n_estimators": (150, 500),  # bounded so trials stay fast; final CV uses 1000 + early stop
+        "learning_rate": (0.01, 0.2),
+        "num_leaves": (15, 127),
+        "max_depth": (-1, 12),
+        "min_child_samples": (5, 100),
+        "subsample": (0.5, 1.0),
+        "colsample_bytree": (0.3, 1.0),
+        "reg_alpha": (0, 10),
+        "reg_lambda": (0, 20),
+    })
+
+    lgbm_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "learning_rate": (0.01, 0.2),
+        "num_leaves": (15, 127),
+        "max_depth": (-1, 12),
+        "min_child_samples": (5, 100),
+        "subsample": (0.5, 1.0),
+        "colsample_bytree": (0.3, 1.0),
+        "reg_alpha": (0, 10),
+        "reg_lambda": (0, 20),
+    })
+
+    # CatBoost search spaces. `iterations` bounded so trials stay fast;
+    # final CV uses the full 1000 + early stopping.
+    cat_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "iterations": (300, 2500),
+        "learning_rate": (0.003, 0.3),
+        "depth": (3, 14),
+        "l2_leaf_reg": (0.1, 150.0),
+        "subsample": (0.5, 1.0),
+        "rsm": (0.4, 1.0),
+        "random_strength": (0.05, 30.0),
+        "border_count": (32, 254),
+        "leaf_estimation_iterations": (1, 30),
+    })
+
+    cat_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "iterations": (300, 2500),
+        "learning_rate": (0.003, 0.3),
+        "depth": (3, 14),
+        "l2_leaf_reg": (0.1, 150.0),
+        "subsample": (0.5, 1.0),
+        "rsm": (0.4, 1.0),
+        "random_strength": (0.05, 30.0),
+        "border_count": (32, 254),
+        "leaf_estimation_iterations": (1, 30),
     })
 
 
@@ -235,21 +544,70 @@ class Config:
     def get_model_params(self) -> Dict[str, Any]:
         task = self.training.task_type
         model = self.get_model_type()
+        if model == "ensemble":
+            # Ensemble params are injected by model_factory from component configs;
+            # this just returns the top-level ensemble spec.
+            if task == TaskType.CLASSIFICATION:
+                return {
+                    "components": list(self.models.ensemble_clf_components),
+                    "weights": self.models.ensemble_clf_weights,
+                    "mode": self.models.ensemble_clf_mode,
+                    "meta_learner_type": self.models.ensemble_meta_learner_type,
+                }
+            return {
+                "components": list(self.models.ensemble_reg_components),
+                "weights": self.models.ensemble_reg_weights,
+                "mode": self.models.ensemble_reg_mode,
+                "meta_learner_type": self.models.ensemble_meta_learner_type,
+            }
         param_map = {
             (TaskType.CLASSIFICATION, "xgboost"): self.models.xgb_clf_params,
             (TaskType.REGRESSION, "xgboost"): self.models.xgb_reg_params,
+            (TaskType.CLASSIFICATION, "xgboost_ordinal"): self.models.xgb_ordinal_clf_params,
             (TaskType.CLASSIFICATION, "lightgbm"): self.models.lgbm_clf_params,
             (TaskType.REGRESSION, "lightgbm"): self.models.lgbm_reg_params,
+            (TaskType.CLASSIFICATION, "catboost"): self.models.cat_clf_params,
+            (TaskType.REGRESSION, "catboost"): self.models.cat_reg_params,
         }
         key = (task, model)
         if key not in param_map:
             raise ValueError(f"No params for task={task}, model={model}")
         return param_map[key]
 
+    def get_component_params(self, component_name: str) -> Dict[str, Any]:
+        """Fetch the params dict for a base model by name (used by EnsembleModel)."""
+        task = self.training.task_type
+        param_map = {
+            (TaskType.CLASSIFICATION, "xgboost"): self.models.xgb_clf_params,
+            (TaskType.REGRESSION, "xgboost"): self.models.xgb_reg_params,
+            (TaskType.CLASSIFICATION, "lightgbm"): self.models.lgbm_clf_params,
+            (TaskType.REGRESSION, "lightgbm"): self.models.lgbm_reg_params,
+            (TaskType.CLASSIFICATION, "catboost"): self.models.cat_clf_params,
+            (TaskType.REGRESSION, "catboost"): self.models.cat_reg_params,
+        }
+        key = (task, component_name)
+        if key not in param_map:
+            raise ValueError(
+                f"No component params for task={task}, component={component_name}"
+            )
+        return param_map[key]
+
     def get_search_space(self) -> Dict[str, Any]:
-        if self.training.task_type == TaskType.CLASSIFICATION:
-            return self.tuning.clf_search_space
-        return self.tuning.reg_search_space
+        task = self.training.task_type
+        model = self.get_model_type()
+        space_map = {
+            (TaskType.CLASSIFICATION, "xgboost"): self.tuning.clf_search_space,
+            (TaskType.CLASSIFICATION, "xgboost_ordinal"): self.tuning.clf_search_space,
+            (TaskType.REGRESSION, "xgboost"): self.tuning.reg_search_space,
+            (TaskType.CLASSIFICATION, "lightgbm"): self.tuning.lgbm_clf_search_space,
+            (TaskType.REGRESSION, "lightgbm"): self.tuning.lgbm_reg_search_space,
+            (TaskType.CLASSIFICATION, "catboost"): self.tuning.cat_clf_search_space,
+            (TaskType.REGRESSION, "catboost"): self.tuning.cat_reg_search_space,
+        }
+        key = (task, model)
+        if key not in space_map:
+            raise ValueError(f"No search space for task={task}, model={model}")
+        return space_map[key]
 
 
 def load_config(config_path: Optional[str] = None) -> Config:

@@ -47,32 +47,57 @@ def run_cv(config: Config):
     return results
 
 
-def run_tune(config: Config):
-    """Run hyperparameter tuning with Optuna."""
+def run_tune(config: Config, sampler: str = "tpe", pruner: str = "hyperband"):
+    """Run Optuna hyperparameter tuning against the configured model type.
+
+    Uses the full training CSV (no train/val pre-split) and fits a fresh
+    preprocessor per fold inside the tuner for leakage-free scoring.
+    """
+    from data_cleaning.column_types import infer_column_types
+    from feature_engineering.preprocessor import build_preprocessor
     from hyperparameter_tuning import OptunaTuner
-    from training import Trainer
-    from modeling.xgboost_model import XGBoostModel
+    from modeling import MODEL_REGISTRY
+    from training import CrossValidator
 
-    trainer = Trainer(config)
-    X, y = trainer.load_data()
-    X_train, X_val, y_train, y_val = trainer.split_data(X, y)
+    cv = CrossValidator(config)
+    X, y = cv.load_data()
 
-    trainer.build_preprocessor(X_train)
-    trainer.preprocessor_.fit(X_train, y_train)
+    # Infer column types once — they don't depend on any fold.
+    num_cols, cat_cols = infer_column_types(
+        X,
+        targets=config.columns.targets,
+        forced_categorical=config.columns.forced_categorical,
+        drop_columns=config.columns.drop_columns,
+    )
 
-    tuner = OptunaTuner(config)
+    def preprocessor_builder():
+        return build_preprocessor(
+            numeric_cols=num_cols,
+            categorical_cols=cat_cols,
+            freq_encoding_cols=config.features.freq_encoding_cols,
+            log_transform_cols=config.features.log_transform_cols,
+            enable_credit_features=config.features.enable_credit_features,
+            target_encoding_cols=config.features.target_encoding_cols,
+            native_categorical=config.features.native_categorical_for_lgbm,
+        )
+
+    tuner = OptunaTuner(config, sampler=sampler, pruner=pruner)
 
     task_type = config.training.task_type
+    model_type = config.get_model_type()
+    base_params = dict(config.get_model_params())
+    model_cls = MODEL_REGISTRY[model_type]
 
     def model_builder(params):
-        model = XGBoostModel(config=params, task_type=task_type)
+        merged = {**base_params, **params}
+        model = model_cls(config=merged, task_type=task_type)
         if task_type == TaskType.CLASSIFICATION:
             model.build_model(num_classes=config.training.n_classes)
         else:
             model.build_model()
         return model
 
-    results = tuner.tune(X_train, y_train.values, trainer.preprocessor_, model_builder)
+    results = tuner.tune(X, y, preprocessor_builder, model_builder)
     tuner.save_results()
     return results
 
@@ -130,6 +155,18 @@ def main():
     parser.add_argument("--clf_model", default=None, help="Path to clf pipeline (submit mode)")
     parser.add_argument("--reg_model", default=None, help="Path to reg pipeline (submit mode)")
     parser.add_argument("--output_path", default=None, help="Output path for predictions")
+    parser.add_argument(
+        "--sampler",
+        default="tpe",
+        choices=["tpe", "random", "cmaes"],
+        help="Optuna sampler for tune mode (default: tpe)",
+    )
+    parser.add_argument(
+        "--pruner",
+        default="hyperband",
+        choices=["hyperband", "median", "none"],
+        help="Optuna pruner for tune mode (default: hyperband)",
+    )
 
     args = parser.parse_args()
 
@@ -151,7 +188,7 @@ def main():
             run_cv(config)
 
         elif args.mode == "tune":
-            run_tune(config)
+            run_tune(config, sampler=args.sampler, pruner=args.pruner)
 
         elif args.mode == "predict":
             model_path = args.model_path
