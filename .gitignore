@@ -19,3 +19,4 @@ data/*.csv
 
 # OS
 .DS_Store
+catboost_info/
