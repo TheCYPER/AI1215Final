@@ -171,6 +171,79 @@ def diverse_catboost_components(
     )
 
 
+# Five-cluster centers spanning the full hyperparameter landscape.
+# Cluster 2 = TPE optimum, Cluster 4 = Random optimum,
+# Clusters 1/3/5 fill the gaps: outer-shallow, transition-middle, outer-deep.
+_OUTER_SHALLOW_CENTER = {
+    "depth": 3,
+    "learning_rate": 0.12,
+    "l2_leaf_reg": 10.0,
+    "subsample": 0.85,
+    "rsm": 0.75,
+    "random_strength": 12.0,
+    "border_count": 80,
+    "leaf_estimation_iterations": 5,
+}
+
+_TRANSITION_MIDDLE_CENTER = {
+    "depth": 5,
+    "learning_rate": 0.065,
+    "l2_leaf_reg": 40.0,
+    "subsample": 0.92,
+    "rsm": 0.85,
+    "random_strength": 4.0,
+    "border_count": 70,
+    "leaf_estimation_iterations": 15,
+}
+
+_OUTER_DEEP_CENTER = {
+    "depth": 9,
+    "learning_rate": 0.02,
+    "l2_leaf_reg": 180.0,
+    "subsample": 0.98,
+    "rsm": 0.92,
+    "random_strength": 2.5,
+    "border_count": 50,
+    "leaf_estimation_iterations": 35,
+}
+
+
+def five_cluster_catboost_components(
+    n_per_cluster: int = 3,
+    seed_base: int = 42,
+    iter_cap: int = 1000,
+) -> List[Dict[str, Any]]:
+    """5 clusters × n_per_cluster, spanning full hyperparameter landscape.
+
+    Cluster order (low→high depth/reg axis):
+      1. outer-shallow  (depth~3, l2~10, lr~0.12)
+      2. Random center   (depth~4, l2~45, lr~0.08) — tuning-validated
+      3. transition-mid  (depth~5, l2~40, lr~0.065)
+      4. TPE center      (depth~6, l2~140, lr~0.04) — tuning-validated
+      5. outer-deep      (depth~9, l2~180, lr~0.02)
+    """
+    clusters = [
+        (_OUTER_SHALLOW_CENTER, seed_base, 400),
+        (_RANDOM_CENTER, seed_base + 10, 403),
+        (_TRANSITION_MIDDLE_CENTER, seed_base + 20, 406),
+        (_TPE_CENTER, seed_base + 30, 409),
+        (_OUTER_DEEP_CENTER, seed_base + 40, 412),
+    ]
+    components: List[Dict[str, Any]] = []
+    for center, seed, seed_offset in clusters:
+        components.extend(
+            cluster_catboost_variants(
+                center,
+                n=n_per_cluster,
+                jitter_pct=0.2,
+                seed=seed,
+                seed_offset=seed_offset,
+                iter_cap=iter_cap,
+            )
+        )
+    return components
+
+
 class TaskType(str, Enum):
     CLASSIFICATION = "classification"
     REGRESSION = "regression"
@@ -244,7 +317,7 @@ class ModelConfig:
     #
     # weights=None means uniform.
     ensemble_clf_components: List[Any] = field(
-        default_factory=lambda: diverse_catboost_components(n_per_cluster=10)
+        default_factory=lambda: five_cluster_catboost_components(n_per_cluster=3)
     )
     ensemble_clf_weights: Optional[List[float]] = None
     # Combination mode: "uniform" / "weighted" / "stacking".
