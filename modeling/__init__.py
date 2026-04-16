@@ -14,8 +14,17 @@ from modeling.base_model import BaseModel
 from modeling.catboost_model import CatBoostModel
 from modeling.ensemble_model import EnsembleModel
 from modeling.lightgbm_model import LightGBMModel
+from modeling.logreg_poly_model import LogRegPolyModel
+from modeling.mlp_model import MLPModel
 from modeling.xgboost_model import XGBoostModel
 from modeling.xgboost_ordinal import XGBoostOrdinalModel
+
+# TabNet is heavy (pulls torch); import-guarded so missing dep doesn't break the registry.
+try:
+    from modeling.tabnet_model import TabNetModel
+    _TABNET_AVAILABLE = True
+except ImportError:
+    _TABNET_AVAILABLE = False
 
 # Register all available models here
 MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
@@ -23,8 +32,12 @@ MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
     "xgboost_ordinal": XGBoostOrdinalModel,
     "lightgbm": LightGBMModel,
     "catboost": CatBoostModel,
+    "mlp": MLPModel,
+    "logreg_poly": LogRegPolyModel,
     "ensemble": EnsembleModel,
 }
+if _TABNET_AVAILABLE:
+    MODEL_REGISTRY["tabnet"] = TabNetModel
 
 
 def model_factory(config: Config) -> BaseModel:

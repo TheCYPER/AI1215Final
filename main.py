@@ -90,6 +90,10 @@ def run_tune(config: Config, sampler: str = "tpe", pruner: str = "hyperband"):
 
     def model_builder(params):
         merged = {**base_params, **params}
+        # MLP proxy: `_mlp_width` scalar → `hidden_layer_sizes` tuple.
+        if "_mlp_width" in merged:
+            w = int(merged.pop("_mlp_width"))
+            merged["hidden_layer_sizes"] = (w, w // 2)
         model = model_cls(config=merged, task_type=task_type)
         if task_type == TaskType.CLASSIFICATION:
             model.build_model(num_classes=config.training.n_classes)
@@ -167,11 +171,49 @@ def main():
         choices=["hyperband", "median", "none"],
         help="Optuna pruner for tune mode (default: hyperband)",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Override clf_model_type (classification) or reg_model_type "
+            "(regression) for this run. Accepts any key from MODEL_REGISTRY. "
+            "Lets the automation script switch base models without editing config.py."
+        ),
+    )
+    parser.add_argument(
+        "--apply_tune_results",
+        default=None,
+        help=(
+            "Path to JSON file with tune best_params. Merges into the current "
+            "model's params dict before run (e.g. used after --mode tune to re-CV "
+            "with tuned hyperparameters)."
+        ),
+    )
 
     args = parser.parse_args()
 
     config = Config()
     config.training.task_type = TaskType(args.task)
+
+    if args.model is not None:
+        if args.task == "classification":
+            config.models.clf_model_type = args.model
+        else:
+            config.models.reg_model_type = args.model
+
+    if args.apply_tune_results:
+        import json
+        with open(args.apply_tune_results) as f:
+            tune_data = json.load(f)
+        best = tune_data.get("best_params", {})
+        # MLP proxy: _mlp_width scalar → hidden_layer_sizes tuple.
+        if "_mlp_width" in best:
+            w = int(best.pop("_mlp_width"))
+            best["hidden_layer_sizes"] = (w, w // 2)
+        # Fetch the current model's params dict and merge in place.
+        current_params = config.get_model_params()
+        current_params.update(best)
+        logger.info(f"Applied tune best_params: {best}")
 
     logger.info("=" * 60)
     logger.info(f"Mode: {args.mode.upper()} | Task: {args.task}")
