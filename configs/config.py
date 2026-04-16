@@ -455,6 +455,78 @@ class ModelConfig:
         "n_jobs": -1,
     })
 
+    # -- MLP (sklearn) classification & regression --
+    # `hidden_layer_sizes` expressed as a tuple; the search-space layer picks
+    # width + depth indirectly via `hidden_layer_size` scalar (inflated at tune time).
+    mlp_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "hidden_layer_sizes": (256, 128),
+        "activation": "relu",
+        "solver": "adam",
+        "alpha": 1e-4,
+        "batch_size": 256,
+        "learning_rate_init": 1e-3,
+        "max_iter": 200,
+        "early_stopping": True,
+        "validation_fraction": 0.1,
+        "n_iter_no_change": 15,
+        "random_state": 42,
+    })
+    mlp_reg_params: Dict[str, Any] = field(default_factory=lambda: {
+        "hidden_layer_sizes": (256, 128),
+        "activation": "relu",
+        "solver": "adam",
+        "alpha": 1e-4,
+        "batch_size": 256,
+        "learning_rate_init": 1e-3,
+        "max_iter": 200,
+        "early_stopping": True,
+        "validation_fraction": 0.1,
+        "n_iter_no_change": 15,
+        "random_state": 42,
+    })
+
+    # -- LogReg + PolynomialFeatures classification & regression --
+    logreg_poly_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "C": 0.1,
+        "max_iter": 2000,
+        "n_jobs": -1,
+        "poly_degree": 2,
+        "poly_interaction_only": True,
+    })
+    logreg_poly_reg_params: Dict[str, Any] = field(default_factory=lambda: {
+        "alpha": 1.0,
+        "poly_degree": 2,
+        "poly_interaction_only": True,
+    })
+
+    # -- TabNet (pytorch-tabnet) classification & regression --
+    tabnet_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "n_d": 16,
+        "n_a": 16,
+        "n_steps": 4,
+        "gamma": 1.3,
+        "lambda_sparse": 1e-3,
+        "max_epochs": 100,
+        "patience": 15,
+        "batch_size": 1024,
+        "virtual_batch_size": 128,
+        "seed": 42,
+        "verbose": 0,
+    })
+    tabnet_reg_params: Dict[str, Any] = field(default_factory=lambda: {
+        "n_d": 16,
+        "n_a": 16,
+        "n_steps": 4,
+        "gamma": 1.3,
+        "lambda_sparse": 1e-3,
+        "max_epochs": 100,
+        "patience": 15,
+        "batch_size": 1024,
+        "virtual_batch_size": 128,
+        "seed": 42,
+        "verbose": 0,
+    })
+
 
 @dataclass
 class FeatureEngineeringConfig:
@@ -519,52 +591,56 @@ class HyperparameterTuningConfig:
     cv_folds: int = 3  # lighter than final-eval CV (5); pick strong params, not final score
     timeout: Optional[int] = None  # no cap — let all n_trials finish
 
-    # XGBoost search spaces (legacy names `clf_search_space` / `reg_search_space` kept
-    # so external callers still work; dispatched via Config.get_search_space below).
+    # XGBoost search spaces — widened for Phase III tune (matched CatBoost scale).
     clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
-        "learning_rate": (0.01, 0.3),
-        "max_depth": (3, 10),
-        "min_child_weight": (1, 20),
-        "subsample": (0.5, 1.0),
+        "n_estimators": (300, 2000),
+        "learning_rate": (0.005, 0.3),
+        "max_depth": (3, 14),
+        "min_child_weight": (1, 30),
+        "subsample": (0.4, 1.0),
         "colsample_bytree": (0.3, 1.0),
-        "reg_alpha": (0, 10),
-        "reg_lambda": (0, 20),
+        "reg_alpha": (0.0, 50.0),
+        "reg_lambda": (0.0, 150.0),
+        "gamma": (0.0, 10.0),
     })
 
     reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
-        "learning_rate": (0.01, 0.3),
-        "max_depth": (3, 10),
-        "min_child_weight": (1, 20),
-        "subsample": (0.5, 1.0),
+        "n_estimators": (300, 2000),
+        "learning_rate": (0.005, 0.3),
+        "max_depth": (3, 14),
+        "min_child_weight": (1, 30),
+        "subsample": (0.4, 1.0),
         "colsample_bytree": (0.3, 1.0),
-        "reg_alpha": (0, 10),
-        "reg_lambda": (0, 20),
+        "reg_alpha": (0.0, 50.0),
+        "reg_lambda": (0.0, 150.0),
+        "gamma": (0.0, 10.0),
     })
 
-    # LightGBM-specific search spaces. Different from XGBoost because leaf-wise
-    # growth makes `num_leaves` and `min_child_samples` the primary capacity /
-    # overfit controls, not `max_depth` + `min_child_weight`.
+    # LightGBM search space — widened for Phase III tune.
     lgbm_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
-        "n_estimators": (150, 500),  # bounded so trials stay fast; final CV uses 1000 + early stop
-        "learning_rate": (0.01, 0.2),
-        "num_leaves": (15, 127),
-        "max_depth": (-1, 12),
-        "min_child_samples": (5, 100),
-        "subsample": (0.5, 1.0),
+        "n_estimators": (300, 2000),
+        "learning_rate": (0.005, 0.25),
+        "num_leaves": (15, 255),
+        "max_depth": (-1, 14),
+        "min_child_samples": (3, 150),
+        "subsample": (0.4, 1.0),
         "colsample_bytree": (0.3, 1.0),
-        "reg_alpha": (0, 10),
-        "reg_lambda": (0, 20),
+        "reg_alpha": (0.0, 50.0),
+        "reg_lambda": (0.0, 150.0),
+        "min_split_gain": (0.0, 5.0),
     })
 
     lgbm_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
-        "learning_rate": (0.01, 0.2),
-        "num_leaves": (15, 127),
-        "max_depth": (-1, 12),
-        "min_child_samples": (5, 100),
-        "subsample": (0.5, 1.0),
+        "n_estimators": (300, 2000),
+        "learning_rate": (0.005, 0.25),
+        "num_leaves": (15, 255),
+        "max_depth": (-1, 14),
+        "min_child_samples": (3, 150),
+        "subsample": (0.4, 1.0),
         "colsample_bytree": (0.3, 1.0),
-        "reg_alpha": (0, 10),
-        "reg_lambda": (0, 20),
+        "reg_alpha": (0.0, 50.0),
+        "reg_lambda": (0.0, 150.0),
+        "min_split_gain": (0.0, 5.0),
     })
 
     # CatBoost search spaces. `iterations` bounded so trials stay fast;
@@ -591,6 +667,57 @@ class HyperparameterTuningConfig:
         "random_strength": (0.05, 30.0),
         "border_count": (32, 254),
         "leaf_estimation_iterations": (1, 30),
+    })
+
+    # MLP search space (sklearn MLPClassifier/Regressor).
+    # hidden_layer_size is a single int here — we'll inflate to 1-3 layers in
+    # a small helper at fit time since Optuna suggest_int doesn't emit tuples.
+    # MLP search space. `_mlp_width` is a scalar that the model_builder in
+    # run_tune converts to `hidden_layer_sizes=(w, w//2)` before constructing
+    # MLPClassifier. Not a real sklearn param — it's a proxy.
+    mlp_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "_mlp_width": (64, 512),
+        "alpha": (1e-5, 1e-1),
+        "learning_rate_init": (1e-4, 1e-2),
+        "batch_size": (64, 512),
+        "max_iter": (100, 400),
+    })
+    mlp_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "_mlp_width": (64, 512),
+        "alpha": (1e-5, 1e-1),
+        "learning_rate_init": (1e-4, 1e-2),
+        "batch_size": (64, 512),
+        "max_iter": (100, 400),
+    })
+
+    # LogReg + Poly search space.
+    logreg_poly_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "C": (0.001, 10.0),
+        "poly_degree": (1, 2),  # 1 = no polynomial, 2 = pairwise interactions
+    })
+    logreg_poly_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "alpha": (0.01, 100.0),
+        "poly_degree": (1, 2),
+    })
+
+    # TabNet search space.
+    tabnet_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "n_d": (8, 64),
+        "n_a": (8, 64),
+        "n_steps": (3, 8),
+        "gamma": (1.0, 2.0),
+        "lambda_sparse": (1e-5, 1e-2),
+        "max_epochs": (50, 150),
+        "patience": (10, 25),
+    })
+    tabnet_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "n_d": (8, 64),
+        "n_a": (8, 64),
+        "n_steps": (3, 8),
+        "gamma": (1.0, 2.0),
+        "lambda_sparse": (1e-5, 1e-2),
+        "max_epochs": (50, 150),
+        "patience": (10, 25),
     })
 
 
@@ -641,6 +768,12 @@ class Config:
             (TaskType.REGRESSION, "lightgbm"): self.models.lgbm_reg_params,
             (TaskType.CLASSIFICATION, "catboost"): self.models.cat_clf_params,
             (TaskType.REGRESSION, "catboost"): self.models.cat_reg_params,
+            (TaskType.CLASSIFICATION, "mlp"): self.models.mlp_clf_params,
+            (TaskType.REGRESSION, "mlp"): self.models.mlp_reg_params,
+            (TaskType.CLASSIFICATION, "logreg_poly"): self.models.logreg_poly_clf_params,
+            (TaskType.REGRESSION, "logreg_poly"): self.models.logreg_poly_reg_params,
+            (TaskType.CLASSIFICATION, "tabnet"): self.models.tabnet_clf_params,
+            (TaskType.REGRESSION, "tabnet"): self.models.tabnet_reg_params,
         }
         key = (task, model)
         if key not in param_map:
@@ -657,6 +790,12 @@ class Config:
             (TaskType.REGRESSION, "lightgbm"): self.models.lgbm_reg_params,
             (TaskType.CLASSIFICATION, "catboost"): self.models.cat_clf_params,
             (TaskType.REGRESSION, "catboost"): self.models.cat_reg_params,
+            (TaskType.CLASSIFICATION, "mlp"): self.models.mlp_clf_params,
+            (TaskType.REGRESSION, "mlp"): self.models.mlp_reg_params,
+            (TaskType.CLASSIFICATION, "logreg_poly"): self.models.logreg_poly_clf_params,
+            (TaskType.REGRESSION, "logreg_poly"): self.models.logreg_poly_reg_params,
+            (TaskType.CLASSIFICATION, "tabnet"): self.models.tabnet_clf_params,
+            (TaskType.REGRESSION, "tabnet"): self.models.tabnet_reg_params,
         }
         key = (task, component_name)
         if key not in param_map:
@@ -676,6 +815,12 @@ class Config:
             (TaskType.REGRESSION, "lightgbm"): self.tuning.lgbm_reg_search_space,
             (TaskType.CLASSIFICATION, "catboost"): self.tuning.cat_clf_search_space,
             (TaskType.REGRESSION, "catboost"): self.tuning.cat_reg_search_space,
+            (TaskType.CLASSIFICATION, "mlp"): self.tuning.mlp_clf_search_space,
+            (TaskType.REGRESSION, "mlp"): self.tuning.mlp_reg_search_space,
+            (TaskType.CLASSIFICATION, "logreg_poly"): self.tuning.logreg_poly_clf_search_space,
+            (TaskType.REGRESSION, "logreg_poly"): self.tuning.logreg_poly_reg_search_space,
+            (TaskType.CLASSIFICATION, "tabnet"): self.tuning.tabnet_clf_search_space,
+            (TaskType.REGRESSION, "tabnet"): self.tuning.tabnet_reg_search_space,
         }
         key = (task, model)
         if key not in space_map:
