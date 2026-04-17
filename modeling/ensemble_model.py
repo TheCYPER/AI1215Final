@@ -20,8 +20,14 @@ Design choices:
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+import copy
+import logging
+
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
+from sklearn.preprocessing import StandardScaler
+
+logger = logging.getLogger("modeling.ensemble")
 
 from configs.config import TaskType
 from modeling.base_model import BaseModel
@@ -40,6 +46,8 @@ class EnsembleModel(BaseModel):
         meta_learner_type: str = "logreg",
         stack_holdout_size: float = 0.2,
         stack_random_state: int = 42,
+        stack_method: str = "holdout",  # "holdout" or "oof"
+        stack_inner_folds: int = 5,
     ):
         super().__init__(config)
         self.task_type = task_type
@@ -51,6 +59,8 @@ class EnsembleModel(BaseModel):
         self.meta_learner_type = meta_learner_type
         self.stack_holdout_size = stack_holdout_size
         self.stack_random_state = stack_random_state
+        self.stack_method = stack_method
+        self.stack_inner_folds = stack_inner_folds
         self._num_classes: int = 5
         self.meta_: Optional[Any] = None
 
@@ -77,6 +87,8 @@ class EnsembleModel(BaseModel):
     # ------------------------------------------------------------------
     def fit(self, X, y, **kwargs):
         if self.mode == "stacking":
+            if self.stack_method == "oof":
+                return self._fit_stacking_oof(X, y, **kwargs)
             return self._fit_stacking(X, y, **kwargs)
         return self._fit_blend(X, y, **kwargs)
 
@@ -127,9 +139,88 @@ class EnsembleModel(BaseModel):
         # 2. Build meta-features from the 20% holdout.
         meta_features = self._stack_features(X_meta)
 
-        # 3. Fit the meta-learner.
+        # 3. Scale meta features (prevents LogReg overflow from correlated bases)
+        #    and fit the meta-learner.
+        self._meta_scaler = StandardScaler()
+        meta_features = self._meta_scaler.fit_transform(meta_features)
         self.meta_ = self._build_meta_learner()
         self.meta_.fit(meta_features, y_meta)
+
+        self.is_fitted_ = True
+        return self
+
+    def _fit_stacking_oof(
+        self,
+        X,
+        y,
+        eval_set=None,
+        sample_weight=None,
+        categorical_feature=None,
+        **kwargs,
+    ):
+        """K-fold OOF stacking: uses ALL training data for both base and meta.
+
+        1. K-inner-fold split on (X, y)
+        2. For each inner fold, fit fresh copies of every base on inner_train,
+           predict_proba on inner_val → fill OOF matrix
+        3. Meta learner trains on full OOF matrix
+        4. Refit all bases on full (X, y) for inference
+        """
+        X = np.asarray(X)
+        y = np.asarray(y)
+        n = len(X)
+        n_bases = len(self.base_models_)
+
+        # OOF matrix to fill
+        oof = np.zeros((n, n_bases * self._num_classes), dtype=np.float64)
+
+        if self.task_type == TaskType.CLASSIFICATION:
+            splitter = StratifiedKFold(
+                n_splits=self.stack_inner_folds, shuffle=True,
+                random_state=self.stack_random_state,
+            )
+            split_iter = splitter.split(X, y)
+        else:
+            splitter = KFold(
+                n_splits=self.stack_inner_folds, shuffle=True,
+                random_state=self.stack_random_state,
+            )
+            split_iter = splitter.split(X)
+
+        for fold_idx, (inner_train, inner_val) in enumerate(split_iter):
+            logger.info(f"  OOF inner fold {fold_idx + 1}/{self.stack_inner_folds}")
+            X_tr, X_val = X[inner_train], X[inner_val]
+            y_tr = y[inner_train]
+            sw_tr = sample_weight[inner_train] if sample_weight is not None else None
+
+            for base_idx, base_model in enumerate(self.base_models_):
+                # Deep copy to get fresh model for this fold
+                fresh = copy.deepcopy(base_model)
+                fresh.fit(
+                    X_tr, y_tr,
+                    sample_weight=sw_tr,
+                    categorical_feature=categorical_feature,
+                )
+                proba = self._base_proba(fresh, X_val)
+                col_start = base_idx * self._num_classes
+                col_end = col_start + self._num_classes
+                oof[inner_val, col_start:col_end] = proba
+
+        # Scale + fit meta on full OOF predictions
+        self._meta_scaler = StandardScaler()
+        oof_scaled = self._meta_scaler.fit_transform(oof)
+        self.meta_ = self._build_meta_learner()
+        self.meta_.fit(oof_scaled, y)
+        logger.info("  OOF meta learner fitted on full OOF predictions")
+
+        # Refit all bases on full data for inference
+        logger.info("  Refitting bases on full training data...")
+        for m in self.base_models_:
+            m.fit(
+                X, y,
+                sample_weight=sample_weight,
+                categorical_feature=categorical_feature,
+            )
 
         self.is_fitted_ = True
         return self
@@ -143,6 +234,8 @@ class EnsembleModel(BaseModel):
         # Regression
         if self.mode == "stacking":
             feats = self._stack_features(X)
+            if hasattr(self, "_meta_scaler") and self._meta_scaler is not None:
+                feats = self._meta_scaler.transform(feats)
             return np.asarray(self.meta_.predict(feats))
         total = sum(self.weights_)
         preds = np.zeros(len(X), dtype=np.float64)
@@ -155,6 +248,8 @@ class EnsembleModel(BaseModel):
             raise NotImplementedError("predict_proba only for classification")
         if self.mode == "stacking":
             feats = self._stack_features(X)
+            if hasattr(self, "_meta_scaler") and self._meta_scaler is not None:
+                feats = self._meta_scaler.transform(feats)
             return self.meta_.predict_proba(feats)
         # uniform / weighted
         total = sum(self.weights_)
@@ -182,8 +277,14 @@ class EnsembleModel(BaseModel):
     def _build_meta_learner(self):
         if self.task_type == TaskType.CLASSIFICATION:
             if self.meta_learner_type == "logreg":
-                # multi_class defaults to 'multinomial' in sklearn 1.5+
                 return LogisticRegression(C=1.0, max_iter=1000, n_jobs=-1)
+            if self.meta_learner_type == "lgbm_shallow":
+                from lightgbm import LGBMClassifier
+                return LGBMClassifier(
+                    n_estimators=50, max_depth=3, num_leaves=8,
+                    learning_rate=0.1, subsample=0.8, colsample_bytree=0.8,
+                    random_state=42, verbosity=-1, n_jobs=-1,
+                )
             raise ValueError(
                 f"Unsupported classification meta learner: {self.meta_learner_type}"
             )

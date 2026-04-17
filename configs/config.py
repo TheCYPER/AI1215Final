@@ -244,6 +244,55 @@ def five_cluster_catboost_components(
     return components
 
 
+def pure_tabnet_stacking_components() -> List[Dict[str, Any]]:
+    """Config F: 12 TabNet (8 tuned-seed-jittered + 3 wild + 1 baseline).
+
+    Best ensemble config from sweep (row #30): 0.8687 ± 0.0040.
+    NN random initialization + architecture variety provides true diversity
+    that meta-learner can exploit — unlike same-architecture tree ensembles.
+    """
+    _TABNET_TUNED = {
+        "n_d": 29, "n_a": 22, "n_steps": 6, "gamma": 1.7146,
+        "lambda_sparse": 0.007308, "max_epochs": 129, "patience": 20,
+        "batch_size": 1024, "virtual_batch_size": 128, "verbose": 0,
+    }
+    _WILD_CONFIGS = [
+        {  # wide + shallow attention
+            "n_d": 48, "n_a": 48, "n_steps": 3, "gamma": 1.2,
+            "lambda_sparse": 0.001, "max_epochs": 100, "patience": 15,
+            "batch_size": 512, "virtual_batch_size": 64, "verbose": 0,
+            "seed": 300,
+        },
+        {  # narrow + deep attention
+            "n_d": 16, "n_a": 16, "n_steps": 8, "gamma": 1.8,
+            "lambda_sparse": 0.01, "max_epochs": 150, "patience": 20,
+            "batch_size": 2048, "virtual_batch_size": 256, "verbose": 0,
+            "seed": 301,
+        },
+        {  # mid + high sparsity
+            "n_d": 32, "n_a": 24, "n_steps": 5, "gamma": 1.5,
+            "lambda_sparse": 0.05, "max_epochs": 120, "patience": 18,
+            "batch_size": 1024, "virtual_batch_size": 128, "verbose": 0,
+            "seed": 302,
+        },
+    ]
+    _BASELINE = {
+        "n_d": 16, "n_a": 16, "n_steps": 4, "gamma": 1.3,
+        "lambda_sparse": 1e-3, "max_epochs": 100, "patience": 15,
+        "batch_size": 1024, "virtual_batch_size": 128, "verbose": 0,
+        "seed": 999,
+    }
+    components: List[Dict[str, Any]] = []
+    for i in range(8):
+        overrides = dict(_TABNET_TUNED)
+        overrides["seed"] = 100 + i
+        components.append({"type": "tabnet", "overrides": overrides})
+    for cfg in _WILD_CONFIGS:
+        components.append({"type": "tabnet", "overrides": dict(cfg)})
+    components.append({"type": "tabnet", "overrides": dict(_BASELINE)})
+    return components
+
+
 class TaskType(str, Enum):
     CLASSIFICATION = "classification"
     REGRESSION = "regression"
@@ -317,13 +366,17 @@ class ModelConfig:
     #
     # weights=None means uniform.
     ensemble_clf_components: List[Any] = field(
-        default_factory=lambda: five_cluster_catboost_components(n_per_cluster=3)
+        default_factory=lambda: pure_tabnet_stacking_components()
     )
     ensemble_clf_weights: Optional[List[float]] = None
     # Combination mode: "uniform" / "weighted" / "stacking".
     ensemble_clf_mode: str = "stacking"
     # Meta learner for stacking mode (LogReg default; Ridge for regression).
     ensemble_meta_learner_type: str = "logreg"
+    # Stacking method: "holdout" (80/20 split) or "oof" (K-fold OOF, slower but better).
+    ensemble_stack_method: str = "holdout"
+    # Number of inner folds for OOF stacking.
+    ensemble_stack_inner_folds: int = 5
     ensemble_reg_components: List[Any] = field(
         default_factory=lambda: ["xgboost", "lightgbm", "catboost"]
     )
@@ -500,14 +553,15 @@ class ModelConfig:
     })
 
     # -- TabNet (pytorch-tabnet) classification & regression --
+    # TabNet classification — tuned via Optuna TPE 60 trials (3-fold best 0.8575).
     tabnet_clf_params: Dict[str, Any] = field(default_factory=lambda: {
-        "n_d": 16,
-        "n_a": 16,
-        "n_steps": 4,
-        "gamma": 1.3,
-        "lambda_sparse": 1e-3,
-        "max_epochs": 100,
-        "patience": 15,
+        "n_d": 29,
+        "n_a": 22,
+        "n_steps": 6,
+        "gamma": 1.7146,
+        "lambda_sparse": 0.007308,
+        "max_epochs": 129,
+        "patience": 20,
         "batch_size": 1024,
         "virtual_batch_size": 128,
         "seed": 42,
@@ -753,12 +807,16 @@ class Config:
                     "weights": self.models.ensemble_clf_weights,
                     "mode": self.models.ensemble_clf_mode,
                     "meta_learner_type": self.models.ensemble_meta_learner_type,
+                    "stack_method": self.models.ensemble_stack_method,
+                    "stack_inner_folds": self.models.ensemble_stack_inner_folds,
                 }
             return {
                 "components": list(self.models.ensemble_reg_components),
                 "weights": self.models.ensemble_reg_weights,
                 "mode": self.models.ensemble_reg_mode,
                 "meta_learner_type": self.models.ensemble_meta_learner_type,
+                "stack_method": self.models.ensemble_stack_method,
+                "stack_inner_folds": self.models.ensemble_stack_inner_folds,
             }
         param_map = {
             (TaskType.CLASSIFICATION, "xgboost"): self.models.xgb_clf_params,

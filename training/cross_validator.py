@@ -117,6 +117,14 @@ class CrossValidator:
 
         if self.config.training.task_type == TaskType.CLASSIFICATION:
             metrics = compute_classification_metrics(y_val.values, val_pred)
+            # Collect OOF data for error analysis
+            try:
+                val_proba = model.predict_proba(X_val_t)
+                metrics["_val_proba"] = val_proba
+            except (NotImplementedError, AttributeError):
+                pass
+            metrics["_val_pred"] = val_pred
+            metrics["_val_true"] = y_val.values
         else:
             metrics = compute_regression_metrics(y_val.values, val_pred)
 
@@ -147,12 +155,15 @@ class CrossValidator:
         splitter = self._get_splitter()
 
         fold_results = []
+        val_indices_all: List[np.ndarray] = []
+
         for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X, y)):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
 
             metrics = self.train_fold(fold_idx, X_train, y_train, X_val, y_val)
             fold_results.append(metrics)
+            val_indices_all.append(val_idx)
 
             primary_key = "accuracy" if task == "classification" else "r2"
             logger.info(f"  Fold {fold_idx + 1}: {primary_key}={metrics[primary_key]:.4f}")
@@ -171,4 +182,37 @@ class CrossValidator:
             json.dump(summary, f, indent=2)
         logger.info(f"CV summary saved to {summary_path}")
 
+        # Run error analysis on aggregated OOF predictions (classification only)
+        if task == "classification" and "_val_pred" in fold_results[0]:
+            self._run_oof_error_analysis(fold_results, val_indices_all)
+
         return summary
+
+    def _run_oof_error_analysis(
+        self,
+        fold_results: List[Dict[str, Any]],
+        val_indices: List[np.ndarray],
+    ):
+        """Aggregate OOF predictions across folds and run error analysis."""
+        from analysis.error_analyzer import run_error_analysis
+
+        all_pred = np.concatenate([r["_val_pred"] for r in fold_results])
+        all_true = np.concatenate([r["_val_true"] for r in fold_results])
+        all_indices = np.concatenate(val_indices)
+
+        all_proba = None
+        if "_val_proba" in fold_results[0]:
+            all_proba = np.concatenate([r["_val_proba"] for r in fold_results])
+
+        if all_proba is None:
+            all_proba = np.zeros((len(all_true), 5))
+
+        logger.info("Running OOF error analysis...")
+        run_error_analysis(
+            y_true=all_true,
+            y_pred=all_pred,
+            y_proba=all_proba,
+            original_indices=all_indices,
+            out_dir=f"{self.config.paths.output_dir}/analysis",
+            n_classes=self.config.training.n_classes,
+        )

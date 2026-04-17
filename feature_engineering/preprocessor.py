@@ -138,6 +138,33 @@ def get_categorical_feature_indices(preprocessor: ColumnTransformer) -> List[int
     return list(range(slc.start, slc.stop))
 
 
+def get_feature_names(preprocessor: ColumnTransformer) -> List[str]:
+    """Return output feature names from a fitted ColumnTransformer.
+
+    Maps each output column index to a human-readable name, so TabNet
+    attention masks can be interpreted.
+    """
+    try:
+        return list(preprocessor.get_feature_names_out())
+    except AttributeError:
+        pass
+    # Fallback: build names from each branch
+    names: List[str] = []
+    for name, trans, cols in preprocessor.transformers_:
+        fitted = preprocessor.named_transformers_.get(name)
+        if fitted is None or fitted == "drop":
+            continue
+        try:
+            branch_names = list(fitted.get_feature_names_out())
+        except Exception:
+            if isinstance(cols, list):
+                branch_names = [f"{name}__{c}" for c in cols]
+            else:
+                branch_names = [f"{name}_{i}" for i in range(getattr(fitted, "n_features_in_", 0))]
+        names.extend(branch_names)
+    return names
+
+
 def _indices_from_shapes(preprocessor: ColumnTransformer, target_name: str) -> List[int]:
     offset = 0
     for name, _, _ in preprocessor.transformers_:

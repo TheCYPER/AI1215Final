@@ -51,14 +51,14 @@ class SubmissionGenerator:
         logger.info(f"Loaded {len(test_df)} test samples")
 
         # Classification predictions
-        clf_pipeline = joblib.load(clf_pipeline_path)
-        risk_tier = clf_pipeline.predict(test_df)
+        clf_artifact = joblib.load(clf_pipeline_path)
+        risk_tier = self._predict_with_artifact(clf_artifact, test_df)
         risk_tier = np.clip(risk_tier, 0, 4).astype(int)
         logger.info(f"RiskTier distribution: {np.bincount(risk_tier, minlength=5)}")
 
         # Regression predictions
-        reg_pipeline = joblib.load(reg_pipeline_path)
-        interest_rate = reg_pipeline.predict(test_df)
+        reg_artifact = joblib.load(reg_pipeline_path)
+        interest_rate = self._predict_with_artifact(reg_artifact, test_df)
         lo, hi = self.config.training.interest_rate_range
         interest_rate = np.clip(interest_rate, lo, hi).round(2)
         logger.info(
@@ -75,3 +75,13 @@ class SubmissionGenerator:
         logger.info(f"Submission saved to {output_path}")
 
         return submission
+
+    @staticmethod
+    def _predict_with_artifact(artifact, raw_df):
+        """Handle both sklearn Pipeline and ensemble dict formats."""
+        if isinstance(artifact, dict) and artifact.get("format") == "ensemble_dict":
+            preprocessor = artifact["preprocessor"]
+            model = artifact["model"]
+            X_t = preprocessor.transform(raw_df)
+            return model.predict(X_t)
+        return artifact.predict(raw_df)

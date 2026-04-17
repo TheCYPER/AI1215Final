@@ -17,7 +17,10 @@ from sklearn.utils.class_weight import compute_sample_weight
 
 from configs.config import Config, TaskType
 from data_cleaning.column_types import infer_column_types
-from feature_engineering.preprocessor import build_preprocessor
+from feature_engineering.preprocessor import (
+    build_preprocessor,
+    get_categorical_feature_indices,
+)
 from modeling import model_factory
 from utils.metrics import (
     compute_classification_metrics,
@@ -74,6 +77,8 @@ class Trainer:
             freq_encoding_cols=self.config.features.freq_encoding_cols,
             log_transform_cols=self.config.features.log_transform_cols,
             enable_credit_features=self.config.features.enable_credit_features,
+            target_encoding_cols=self.config.features.target_encoding_cols,
+            native_categorical=self.config.features.native_categorical_for_lgbm,
         )
 
     def compute_sample_weights(self, y: pd.Series) -> Optional[np.ndarray]:
@@ -93,6 +98,7 @@ class Trainer:
         X_val: np.ndarray,
         y_val: np.ndarray,
         sample_weight: Optional[np.ndarray] = None,
+        categorical_feature=None,
     ) -> Dict[str, Any]:
         """Train model and return metrics."""
         fit_kwargs: Dict[str, Any] = {}
@@ -101,6 +107,9 @@ class Trainer:
 
         if self.config.training.use_early_stopping:
             fit_kwargs["eval_set"] = [(X_val, y_val)]
+
+        if categorical_feature is not None:
+            fit_kwargs["categorical_feature"] = categorical_feature
 
         model.fit(X_train, y_train, **fit_kwargs)
 
@@ -123,17 +132,33 @@ class Trainer:
     def save_artifacts(
         self, model, results: Dict[str, Any]
     ):
-        """Save preprocessor+model pipeline and metrics."""
-        from sklearn.pipeline import Pipeline
+        """Save preprocessor+model pipeline and metrics.
 
-        pipeline = Pipeline([
-            ("preprocessor", self.preprocessor_),
-            ("model", model.model_),
-        ])
+        For simple models: sklearn Pipeline (preprocessor + model.model_).
+        For EnsembleModel: dict with preprocessor + full BaseModel wrapper,
+        because EnsembleModel.model_ is a list of base models that can't
+        be plugged into a sklearn Pipeline step.
+        """
+        from modeling.ensemble_model import EnsembleModel
+        from sklearn.pipeline import Pipeline
 
         task = self.config.training.task_type.value
         pipeline_path = f"{self.config.paths.models_dir}/{task}_pipeline.joblib"
-        joblib.dump(pipeline, pipeline_path)
+
+        if isinstance(model, EnsembleModel):
+            artifact = {
+                "preprocessor": self.preprocessor_,
+                "model": model,
+                "format": "ensemble_dict",
+            }
+            joblib.dump(artifact, pipeline_path)
+        else:
+            pipeline = Pipeline([
+                ("preprocessor", self.preprocessor_),
+                ("model", model.model_),
+            ])
+            joblib.dump(pipeline, pipeline_path)
+
         logger.info(f"Pipeline saved to {pipeline_path}")
 
         # Save metrics (exclude non-serializable items)
@@ -168,6 +193,8 @@ class Trainer:
         X_val_t = self.preprocessor_.transform(X_val)
         logger.info(f"Features after preprocessing: {X_train_t.shape[1]}")
 
+        cat_indices = get_categorical_feature_indices(self.preprocessor_)
+
         # Model
         model = model_factory(self.config)
         logger.info(f"Model: {self.config.get_model_type()}")
@@ -179,6 +206,7 @@ class Trainer:
         results = self.train(
             model, X_train_t, y_train.values, X_val_t, y_val.values,
             sample_weight=sample_weight,
+            categorical_feature=cat_indices if cat_indices else None,
         )
 
         # Log primary metric

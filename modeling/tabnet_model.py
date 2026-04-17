@@ -54,26 +54,29 @@ class TabNetModel(BaseModel):
         return self
 
     def _build_constructor_params(self) -> Dict[str, Any]:
-        # Limit threads to 1 to prevent fork-unsafe SEGFAULT when sklearn's
-        # ColumnTransformer n_jobs=-1 spawns joblib workers alongside PyTorch.
         import os
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+        # OMP=1 is the only safe config: joblib fork + multi-thread OMP = SEGFAULT.
+        # MPS GPU also crashes pytorch-tabnet. Tried OMP=4 and MPS — both hang/crash.
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
         torch.set_num_threads(1)
+
+        default_device = "cpu"
 
         params = dict(self.config)
         self._max_epochs = int(params.pop("max_epochs", 100))
         self._patience = int(params.pop("patience", 15))
         self._batch_size = int(params.pop("batch_size", 1024))
         self._virtual_batch_size = int(params.pop("virtual_batch_size", 128))
-        params.setdefault("n_d", 16)
-        params.setdefault("n_a", 16)
-        params.setdefault("n_steps", 4)
-        params.setdefault("gamma", 1.3)
-        params.setdefault("lambda_sparse", 1e-3)
+        params.setdefault("n_d", 29)
+        params.setdefault("n_a", 22)
+        params.setdefault("n_steps", 6)
+        params.setdefault("gamma", 1.7146)
+        params.setdefault("lambda_sparse", 0.007308)
         params.setdefault("seed", 42)
         params.setdefault("verbose", 0)
-        params.setdefault("device_name", "cpu")
+        params.setdefault("device_name", default_device)
         params.setdefault("optimizer_fn", torch.optim.Adam)
         params.setdefault("optimizer_params", {"lr": 2e-2})
         return params
@@ -125,6 +128,9 @@ class TabNetModel(BaseModel):
             X_val = np.asarray(X_val, dtype=np.float32)
             X_val = np.nan_to_num(X_val, nan=0.0, posinf=1e6, neginf=-1e6)
             y_val = np.asarray(y_val)
+            # pytorch-tabnet asserts y_val.ndim == y_train.ndim; keep them aligned.
+            if self.task_type == TaskType.REGRESSION and y_val.ndim == 1:
+                y_val = y_val.reshape(-1, 1)
             fit_kwargs["eval_set"] = [(X_val, y_val)]
             fit_kwargs["eval_metric"] = (
                 ["accuracy"] if self.task_type == TaskType.CLASSIFICATION else ["rmse"]
@@ -152,3 +158,13 @@ class TabNetModel(BaseModel):
         X = np.asarray(X, dtype=np.float32)
         X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
         return self.model_.predict_proba(X)
+
+    def explain(self, X) -> np.ndarray:
+        """Return aggregated attention masks (n_samples, n_features).
+
+        Each row sums to ~1.0 and represents how much TabNet "looked at"
+        each feature when making its prediction.
+        """
+        X = np.asarray(X, dtype=np.float32)
+        X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
+        return self.model_.explain(X)  # returns (M_explain, masks_per_step)

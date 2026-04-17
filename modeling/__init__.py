@@ -76,6 +76,8 @@ def model_factory(config: Config) -> BaseModel:
             weights=spec.get("weights"),
             mode=spec.get("mode", "uniform"),
             meta_learner_type=spec.get("meta_learner_type", "logreg"),
+            stack_method=spec.get("stack_method", "holdout"),
+            stack_inner_folds=spec.get("stack_inner_folds", 5),
         )
         if task_type == TaskType.CLASSIFICATION:
             ensemble.build_model(num_classes=config.training.n_classes)

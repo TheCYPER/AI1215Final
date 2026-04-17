@@ -106,15 +106,26 @@ def run_tune(config: Config, sampler: str = "tpe", pruner: str = "hyperband"):
     return results
 
 
+def _load_and_predict(artifact, raw_df):
+    """Handle both sklearn Pipeline and ensemble dict formats."""
+    if isinstance(artifact, dict) and artifact.get("format") == "ensemble_dict":
+        preprocessor = artifact["preprocessor"]
+        model = artifact["model"]
+        X_t = preprocessor.transform(raw_df)
+        return model.predict(X_t)
+    # Standard sklearn Pipeline
+    return artifact.predict(raw_df)
+
+
 def run_predict(config: Config, model_path: str, output_path: str = None):
     """Make predictions on test set with a single pipeline."""
     import joblib
     import pandas as pd
 
-    pipeline = joblib.load(model_path)
+    artifact = joblib.load(model_path)
     test_df = pd.read_csv(config.paths.test_csv)
 
-    predictions = pipeline.predict(test_df)
+    predictions = _load_and_predict(artifact, test_df)
     logger.info(f"Generated {len(predictions)} predictions")
 
     if output_path is None:
