@@ -26,6 +26,12 @@ try:
 except ImportError:
     _TABNET_AVAILABLE = False
 
+try:
+    from modeling.ft_transformer_model import FTTransformerModel
+    _FT_AVAILABLE = True
+except ImportError:
+    _FT_AVAILABLE = False
+
 # Register all available models here
 MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
     "xgboost": XGBoostModel,
@@ -38,6 +44,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
 }
 if _TABNET_AVAILABLE:
     MODEL_REGISTRY["tabnet"] = TabNetModel
+if _FT_AVAILABLE:
+    MODEL_REGISTRY["ft_transformer"] = FTTransformerModel
 
 
 def model_factory(config: Config) -> BaseModel:

@@ -417,12 +417,10 @@ class ModelConfig:
         "n_jobs": -1,
     })
 
-    # -- XGBoost ordinal-regression classifier --
-    # Treats ordered class labels as continuous, rounds+clips at predict time.
-    # Objective fixed to reg:squarederror internally.
+    # -- XGBoost ordinal classifier (cumulative logits, CORAL-style) --
+    # K-1 binary classifiers; each predicts P(y>k). Objective is fixed to
+    # binary:logistic inside the model wrapper — don't set it here.
     xgb_ordinal_clf_params: Dict[str, Any] = field(default_factory=lambda: {
-        "objective": "reg:pseudohubererror",
-        "huber_slope": 1.0,
         "n_estimators": 500,
         "learning_rate": 0.05,
         "max_depth": 5,
@@ -432,7 +430,6 @@ class ModelConfig:
         "reg_lambda": 5.0,
         "reg_alpha": 1.0,
         "random_state": 42,
-        "eval_metric": "mphe",
         "tree_method": "hist",
         "n_jobs": -1,
     })
@@ -579,6 +576,28 @@ class ModelConfig:
         "virtual_batch_size": 128,
         "seed": 42,
         "verbose": 0,
+    })
+
+    # -- FT-Transformer (rtdl_revisiting_models) --
+    # n_blocks picks a preset (1..6) that sets d_block/dropouts/etc. 3 blocks
+    # is the paper's recommended starting point for mid-sized tabular data.
+    ft_transformer_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "n_blocks": 2,
+        "max_epochs": 30,
+        "patience": 8,
+        "batch_size": 2048,
+        "lr": 3e-4,
+        "weight_decay": 1e-5,
+        "seed": 42,
+    })
+    ft_transformer_reg_params: Dict[str, Any] = field(default_factory=lambda: {
+        "n_blocks": 3,
+        "max_epochs": 100,
+        "patience": 15,
+        "batch_size": 1024,
+        "lr": 1e-4,
+        "weight_decay": 1e-5,
+        "seed": 42,
     })
 
 
@@ -832,6 +851,8 @@ class Config:
             (TaskType.REGRESSION, "logreg_poly"): self.models.logreg_poly_reg_params,
             (TaskType.CLASSIFICATION, "tabnet"): self.models.tabnet_clf_params,
             (TaskType.REGRESSION, "tabnet"): self.models.tabnet_reg_params,
+            (TaskType.CLASSIFICATION, "ft_transformer"): self.models.ft_transformer_clf_params,
+            (TaskType.REGRESSION, "ft_transformer"): self.models.ft_transformer_reg_params,
         }
         key = (task, model)
         if key not in param_map:
@@ -854,6 +875,8 @@ class Config:
             (TaskType.REGRESSION, "logreg_poly"): self.models.logreg_poly_reg_params,
             (TaskType.CLASSIFICATION, "tabnet"): self.models.tabnet_clf_params,
             (TaskType.REGRESSION, "tabnet"): self.models.tabnet_reg_params,
+            (TaskType.CLASSIFICATION, "ft_transformer"): self.models.ft_transformer_clf_params,
+            (TaskType.REGRESSION, "ft_transformer"): self.models.ft_transformer_reg_params,
         }
         key = (task, component_name)
         if key not in param_map:
