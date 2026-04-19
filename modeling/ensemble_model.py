@@ -86,11 +86,38 @@ class EnsembleModel(BaseModel):
     # fit dispatching
     # ------------------------------------------------------------------
     def fit(self, X, y, **kwargs):
+        # macOS libomp double-load workaround: fitting LightGBM AFTER XGBoost
+        # in the same process segfaults (XGB's libomp blocks LGBM's libgomp
+        # init; KMP_DUPLICATE_LIB_OK doesn't help — that flag is for Intel
+        # MKL libiomp5 only). Sort bases so LightGBM always fits first.
+        # Confirmed empirically 2026-04-19 via /tmp/diag_order.py:
+        # CatBoost→LGBM→XGB OK; CatBoost→XGB→LGBM segfault 11.
+        self._sort_bases_for_libomp_safety()
         if self.mode == "stacking":
             if self.stack_method == "oof":
                 return self._fit_stacking_oof(X, y, **kwargs)
             return self._fit_stacking(X, y, **kwargs)
         return self._fit_blend(X, y, **kwargs)
+
+    def _sort_bases_for_libomp_safety(self) -> None:
+        """Reorder base_models_ so LightGBM fits before XGBoost.
+
+        Priority: CatBoost (no libomp conflict) → LightGBM (libgomp) →
+        XGBoost (libomp) → others. Stable sort preserves order within the
+        same priority bucket, and the same order is reused at predict time
+        because base_models_ is the single source of truth — meta-feature
+        columns stay aligned.
+        """
+        priority = {
+            "CatBoostModel": 0,
+            "LightGBMModel": 1,  # MUST come before XGBoost on macOS
+            "XGBoostModel": 2,
+            "TabNetModel": 3,
+            "MLPModel": 4,
+            "LogRegPolyModel": 5,
+            "CoralMlpModel": 6,
+        }
+        self.base_models_.sort(key=lambda m: priority.get(type(m).__name__, 99))
 
     def _fit_blend(self, X, y, **kwargs):
         """Uniform / weighted mode: just fit each base on the full data."""
@@ -263,9 +290,23 @@ class EnsembleModel(BaseModel):
     # helpers
     # ------------------------------------------------------------------
     def _stack_features(self, X) -> np.ndarray:
-        """Concatenate each base's predict_proba into a (n, N_bases * n_classes) matrix."""
-        parts = [self._base_proba(m, X) for m in self.base_models_]
-        return np.hstack(parts)
+        """Build the stacking meta-feature matrix.
+
+        Classification: concat each base's predict_proba into
+        ``(n, N_bases * n_classes)`` — meta sees per-class probabilities so it
+        can learn class-specific weighting.
+
+        Regression: each base contributes a single scalar prediction column,
+        producing ``(n, N_bases)`` — meta (Ridge) learns per-model weights.
+        """
+        if self.task_type == TaskType.CLASSIFICATION:
+            parts = [self._base_proba(m, X) for m in self.base_models_]
+            return np.hstack(parts)
+        cols = [
+            np.asarray(m.predict(X), dtype=np.float64).ravel()
+            for m in self.base_models_
+        ]
+        return np.column_stack(cols)
 
     def _base_proba(self, model: BaseModel, X) -> np.ndarray:
         """Get base model predict_proba, normalizing shape quirks (CatBoost)."""

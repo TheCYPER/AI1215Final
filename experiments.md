@@ -46,3 +46,55 @@
 | 34 | 2026-04-17 14:45 | reg | regression sweep: CatBoost default 5-fold | scripts/regression_sweep.py — catboost_default | 0.8317 ± 0.0147 (row#32) | 0.8367 ± 0.0148 | +0.0050 | 待定 | 当前 reg SOTA（+0.0050 vs XGB，<1×std 算 待定 但最高均值）。Ordered TS 在回归上的优势不如分类 |
 | 35 | 2026-04-17 15:12 | reg | regression sweep: Apply Optuna TPE 40-trials tuned params → 5-fold CV | cat_reg tuned: iter=775, lr=0.055, depth=6, l2=51.9, rsm=0.76, random_strength=6.6, border=182 | 0.8367 ± 0.0148 (row#34 CatBoost default) | 0.8345 ± 0.0145 | -0.0022 | 待定 | tune 反而微降 mean；与分类上早期 "default already strong" 模式一致；tune 空间可能还需更 wide / 更多 trials |
 | 36 | 2026-04-17 14:49 | reg | regression sweep: TabNet default | scripts/regression_sweep.py — tabnet_default | — | ERROR | — | not work | `AssertionError: Dimension mismatch between y_val_0 (7000,) and y_train (28000, 1)` — tabnet_model.py fit() 对 regression reshape y_train 到 (n,1)，但没 reshape eval_set 的 y_val。需要修复 |
+| 37 | 2026-04-17 18:30 | reg | 修复 TabNet reg eval_set y shape bug 后的 3-fold 基线 | tabnet_model.py fit(): eval_set 里 y_val 也 reshape 到 (n,1) for regression | 0.8367 ± 0.0148 (row#34 CatBoost default 5-fold) | 0.8245 ± 0.0076 | — (3-fold vs 5-fold 不可直接比) | 待定 | **3-fold std 0.0076 显著小于 5-fold std 0.0148**（折数少时 mean 方差高但 fold 数据多所以每折更稳）。单模型 TabNet reg < CatBoost 5-fold，但这是 3-fold 估计 |
+| 38 | 2026-04-17 19:15 | cls | Phase IV 假设：TabNet 错误都是 ±1 ordinal；改用 cumulative logits (CORAL-style) K-1 binary classifiers + rank-consistent monotone projection 的 XGB-Ordinal 应提供真正的 ordinal 结构先验，加入 ensemble 后应降低 boundary 误差 | 重写 modeling/xgboost_ordinal.py：pseudohuber regressor → K-1 XGBClassifier binary heads，推理时 cumulative diff + monotone projection；configs 去掉 softmax-only keys | 0.8687 ± 0.0040 (row#30 Pure TabNet SOTA) | 0.8186 ± 0.0039 | -0.0501 | not work | 单模型弱于 SOTA 预期之中；但 error correlation 显示 Q(xgb_ordinal, catboost) = **0.967** — 错误模式和 CatBoost 几乎一样。**ordinal 头没带来架构多样性**，底层 XGBoost 树仍然学到和其他树模型相同的决策边界。结论：单纯 reformulate loss + head 不够，必须换 base architecture |
+| 39 | 2026-04-17 19:58 | cls | FT-Transformer (rtdl) 作为 dense-attention transformer 与 TabNet (sparse attention) 架构正交，应提供真多样性 | 新增 modeling/ft_transformer_model.py (rtdl_revisiting_models)；初版 n_blocks=3/max_ep=100，跑 20 min 仍卡 fold 1；改 n_blocks=2/max_ep=30/lr=3e-4 | 0.8687 ± 0.0040 (row#30 SOTA) | **0.4994, 0.5010** (fold 1,2) killed | — | not work | CPU 上 FT-Transformer 不收敛：30 epochs 太少 / lr=3e-4 太高 / batch_size=2048 梯度质量低。每 fold 至少 30 min，5-fold × ~20 hrs tune 不切实际 in CPU-only 环境。**搁置，有 GPU 再试** |
+| 40 | 2026-04-17 20:36 | cls | diagnostic：所有 6 个 single-model OOF 做 Cohen's kappa / Yule's Q / error-overlap 分析，量化 Q1（加 CatBoost 为什么没用）和 Q3（TabNet 是不是最强）| 新增 analysis/error_correlation.py；training/cross_validator.py 加 OOF 持久化到 outputs/oof/<model>.npz | — | — | — | diagnostic | **关键发现**：tree 家族内部 Q ≈ 0.96-0.97 (nearly identical errors)；TabNet vs 所有 tree Q = 0.90-0.93；TabNet 与 logreg_poly Q=0.784（overlap 0.302）为全场最低。→ 突破必须来自**架构 + 目标函数都换**的模型，或**按 TabNet 置信度分流**让 specialist 接管低置信样本 |
+| 41 | 2026-04-18 12:06 | cls | Phase IV 假设：neural (非 tree) + ordinal head (非 softmax) CORN-MLP 应在 TabNet 自信错的 boundary 样本上有不同错误模式；目标加入 ensemble 提升 SOTA | 新增 modeling/coral_mlp_model.py (MLP 256→128→64 + coral-pytorch CORN head + corn_loss)；fix 两 bug：(1) _iter_batches 用固定 seed 每 epoch 同 shuffle → 改成 train_rng 每 epoch 新 perm；(2) preprocessor 输出 std=33170 未归一化 → fit() 内加 StandardScaler | 0.8687 ± 0.0040 (row#30 SOTA) | 0.8373 ± 0.0028 | -0.0314 | 待定 | **CORN-MLP 单模型成第 2 强 (0.8373)，仅次于 TabNet 0.8573；std 0.0028 极稳**。单模型不破 SOTA，但对 ensemble 价值才是关键。Q(CORN-MLP, TabNet)=0.938 反直觉地比 Q(CatBoost, TabNet)=0.933 还高 → 架构换+loss 换 ≠ 错误模式不同 |
+| 42 | 2026-04-17 21:59 | reg | Optuna TPE + Hyperband, 60 trials, no timeout, 3-fold internal CV on TabNet reg | scripts/tabnet_reg_autorun.py — best: n_d=8, n_a=15, n_steps=4, gamma=1.95, lambda_sparse=0.0099, max_epochs=122, patience=24；263 min | 0.8245 ± 0.0076 (row#37 baseline 3-fold) | 0.8338 ± 0.0056 | +0.0093 | work | **+1.2× std 改进**，且 std 降 0.0076→0.0056。**4 个参数撞搜索空间边界**：n_d 撞下界（8），gamma/lambda_sparse/patience 撞上界 → tune 信号是"想要更浅更稀疏"但被禁 → widen 应有额外空间 |
+| 43 | 2026-04-18 09:37 | reg | Widened tune: n_d 4-64, gamma 1-3, lambda_sparse 1e-5-0.05, patience 10-40, +batch_size 512-2048；60 trials no timeout 3-fold | scripts/tabnet_reg_widen_tune.py — best: n_d=32, n_a=19, n_steps=9, gamma=2.41, lambda_sparse=0.044, max_epochs=146, patience=37, batch_size=1587 | 0.8338 ± 0.0056 (row#42 narrow-tuned 3-fold) | 0.8349 ± 0.0068 (3-fold) / **0.8272 ± 0.0242 (5-fold)** | +0.0011 (3-fold) | 待定 | **3-fold delta 仅 +0.0011**：widening 释放了 4 个边界（n_d/gamma/lambda_sparse/patience 都从撞墙变中位）但收益极少 → 单模型 ceiling 已近。**5-fold 暴露真实弱点：r2=0.8272 排第 5（落于 4 个 tree 之后），std 0.0242 历史最大**。TabNet reg ≠ TabNet cls：cls 是最强，reg 是最弱 + 最不稳。**Ensemble 战略要重写**：不能 clone pure-TabNet (cls SOTA)，要用 CatBoost-主导的 heterogeneous stacking |
+| 44 | 2026-04-18 11:56 | reg | R-A: 30 diverse CatBoost (10 TPE + 10 shallow + 10 middle) stacking + Ridge meta；clone cls row #15 design | scripts/regression_ensemble_autorun.py R-A_30_diverse_catboost；ensemble_reg_mode=stacking, meta=ridge, 80/20 holdout, iter_cap=800 | 0.8367 ± 0.0148 (row#34 CatBoost default 5-fold) | 0.8338 ± 0.0149 | -0.0029 | 待定 | **同质 reg stacking 不工作**（vs cls row #15 +0.0097 的鲜明对比）。原因：reg 用 scalar predict，meta Ridge 只能做线性组合 30 个高度相关 CatBoost → ≈ 平均 → 接近单 CatBoost；cls 用 5-class proba（150 维 meta 特征），meta 学非线性边界。**结论：reg 必须靠 heterogeneous (XGB/LGBM 不同架构) 才有非冗余信号**。R-B/C/D 仍 pending。注：本 process 跑完 R-A 后 SIGKILL（joblib 资源泄露），已用 isolated-process runner 重启 |
+| 45 | 2026-04-19 09:50 | cls | diagnostic：post-hoc gated mixture 测试 — TabNet single 高置信用自己，低置信交给 specialist；想看哪个 specialist 在 boundary 上对 | /tmp/test_gated3.py：threshold ∈ [0.50, 0.99] 扫；6 个 specialist 用各自 OOF probas | 0.8573 (TabNet single) | best=Gated(TabNet, CORN-MLP) @ t=0.55: **0.8624** | +0.0051 vs TabNet single；**仍 -0.0063 vs SOTA 0.8687** | diagnostic | **关键反直觉发现**：gated delta **严格按 specialist 单模型 acc 排序**，与 Q (多样性) 几乎不相关。CORN-MLP (acc 0.8373, Q=0.938 高) > CatBoost (0.8263, Q=0.933) > xgb_ord > mlp > lgbm > **logreg_poly (0.7152, Q=0.784 最低) 反而拉低 acc**。结论：boundary 样本上"specialist 准"重要过"specialist 与主模型异质"。前提条件：要破 SOTA 必须用 stacking meta，不是 hard-threshold gate |
+| 46 | 2026-04-19 12:36 | cls | Stack(12 TabNet + 3 CORN-MLP) with LogReg meta — 用 stacking 代替 gate，让 meta learner 学非线性组合；假设 CORN-MLP (单模型 0.8373 第 2 强) 能被 meta 在 boundary 上充分利用 | scripts/stack_tabnet_coral.py + configs tabnet_plus_coral_components(3)；15 bases (12 TabNet tuned-jitter/wild/baseline + 3 CORN-MLP 变体 hidden 256/512/192) | 0.8687 ± 0.0040 (row#30 SOTA) | 0.8675 ± 0.0027 | -0.0012 | 待定 | **加 3 个 CORN-MLP 不但没突破 SOTA，还微降**（-0.3×std，std 0.0027 创新低）。与 Phase III row #25-29 (加 CatBoost/MLP 拖累) 模式一致：**即使 CORN-MLP 比 CatBoost 单模型强 1pt，进入 12-TabNet 池仍然稀释 TabNet 信号**。meta learner LogReg 在 15×5=75 维 meta feature 上无法找出"让 CORN-MLP 在 boundary 上接管"的模式。109.7 min 跑完 5-fold |
+| 47 | 2026-04-19 14:27 | cls | Stack(12 TabNet + 5 CORN-MLP)：3→5 能不能过 SOTA？测试 CORN-MLP 数量 vs 回报的边际 | tabnet_plus_coral_components(5)；17 bases (12 TabNet + 5 CORN-MLP 变体 hidden 256/512/192/384/128) | 0.8687 ± 0.0040 (row#30 SOTA) | 0.8679 ± 0.0040 | -0.0008 | 待定 | **3→5 仅 +0.0004**（从 0.8675→0.8679），仍 -0.0008 vs SOTA。std 从 0.0027 回升到 0.0040。外推加到 7/9 个成本 2hr/次回报 ~+0.0004 极低效。**确认饱和**：加更多 CORN-MLP 不是突破路径。5 个 CORN-MLP × 5 class = 25 维 meta feature 已冗余（CORN-MLP 互相 corr 高）。111 min 跑完 5-fold。**下一步**：post-hoc gated(stack_12+5, CORN-MLP single)，或训 dedicated boundary specialist |
+| 48 | 2026-04-19 14:50 | cls | diagnostic：post-hoc gated(stack_12+5 as high_conf, any base as low_conf) OOF 扫描 + half-split 独立 threshold 验证；假设 stacking 在 base 分歧大时过度自信，退回单 base 更稳 | /tmp/test_gated_stacking.py + /tmp/threshold_stability.py；6 specialist × threshold ∈ [0.30, 0.99] | 0.8687 (row#30 SOTA) | **Gated(stack_12+5, TabNet single) @ t=0.59: 0.8718** | **+0.0031** vs SOTA | 待定 (需 CV 验证) | **Phase IV 首次 OOF-level 超过 SOTA！**TabNet single 反常地比 CORN-MLP 更好 specialist (+0.0031 vs +0.0003)——stack ensemble 在 low-conf 时的过度自信错误平均，由强单 base 兜底更稳。**稳健性证据**：(1) threshold [0.54, 0.68] 宽区间全部 > SOTA，平顶非尖峰；(2) half-split 独立 tune 两半**都选 t=0.590**，honest mean=0.8718。**严格按 skill 仍算 待定**（delta +0.0031 < 2×std 0.008），但 half-split 提供接近 CV 的强证据。**下一步**：直接 Kaggle 提交看 public LB |
+
+
+## Reflection — 2026-04-17 (Phase IV start)
+
+**Stuck point**: Pure TabNet stacking 0.8687 (row #30) is a plateau. Phase III
+experiments #25-#31 showed a clean monotone trend — **more TabNet → higher
+score**; every non-TabNet addition (CatBoost/MLP/LGBM/XGB/LogReg) dragged the
+mean down. `Config F` (12 pure TabNet) is SOTA; adding *any* tree-based
+learner regresses.
+
+**Shared assumption I was missing**: "diversity = different model family".
+Experiment #38 proved this wrong. I rewrote XGBoost-Ordinal with
+cumulative-logits (a genuinely different loss + head formulation) expecting
+its errors to be complementary to CatBoost. Result: Q(xgb_ordinal, catboost)
+= **0.967** — nearly identical error pattern. **What matters for ensemble
+diversity is the base architecture's inductive bias, not the output head.**
+A tree is a tree; switching from softmax to ordinal logits doesn't change
+which samples it gets wrong.
+
+Row #40 (error correlation diagnostic) quantified it across 6 bases. All
+trees cluster at Q ≈ 0.96-0.97 with each other. TabNet sits at Q ≈ 0.90-0.93
+with all trees — still high. The *only* model with genuinely different
+errors is logreg_poly (Q=0.784, overlap 0.302 with TabNet) — but accuracy is
+only 0.7152, too weak standalone.
+
+**New direction (one, not three)**: break the "tree-family" bottleneck with
+a truly non-tree base. Row #41 is the first attempt — CORN-MLP (coral-pytorch
++ MLP backbone + ordinal CORN head). The MLP-based decision boundary is
+shaped by gradient descent on continuous features, which is structurally
+different from greedy axis-aligned splits. Row #41's first run had a shuffle
+bug (fixed); re-running to get a real number. If Q(CORN-MLP, TabNet) < 0.85,
+this is the complementary base we need. If not, pivot to **confidence-gated
+mixture**: TabNet for top-1 proba ≥ 0.8 (already 93% accurate), logreg_poly
+(lowest Q with TabNet) as the low-confidence specialist — a cheap stepwise
+win requiring no new base.
+
+**Learning for future me**: on this dataset, "error diversity ≠ algorithmic
+diversity". The only reliable levers are (a) fundamentally different base
+architecture families, (b) data-partitioning/gating by confidence. Keep
+stacking more trees/variants of trees stops helping past ~Q=0.95.
