@@ -293,6 +293,32 @@ def pure_tabnet_stacking_components() -> List[Dict[str, Any]]:
     return components
 
 
+def tabnet_plus_coral_components(n_coral: int = 3) -> List[Dict[str, Any]]:
+    """Config F + N CORN-MLP variants. Tests whether CORN-MLP (acc 0.8373,
+    Q=0.938 vs TabNet) can lift the 0.8687 SOTA when meta-learner sees both
+    families' OOF probas.
+
+    CORN-MLP variants vary hidden_sizes / dropout / lr to give some
+    decorrelation among themselves.
+    """
+    components = pure_tabnet_stacking_components()
+    _CORAL_VARIANTS = [
+        {"hidden_sizes": [256, 128, 64], "dropout": 0.20, "lr": 1e-3, "seed": 200},
+        {"hidden_sizes": [512, 256, 128], "dropout": 0.30, "lr": 7e-4, "seed": 201},
+        {"hidden_sizes": [192, 96], "dropout": 0.15, "lr": 1.5e-3, "seed": 202},
+        {"hidden_sizes": [384, 192, 96], "dropout": 0.25, "lr": 1e-3, "seed": 203},
+        {"hidden_sizes": [128, 64, 32], "dropout": 0.10, "lr": 2e-3, "seed": 204},
+    ]
+    for v in _CORAL_VARIANTS[:n_coral]:
+        ov = dict(v)
+        ov.setdefault("max_epochs", 80)
+        ov.setdefault("patience", 12)
+        ov.setdefault("batch_size", 1024)
+        ov.setdefault("weight_decay", 1e-4)
+        components.append({"type": "coral_mlp", "overrides": ov})
+    return components
+
+
 class TaskType(str, Enum):
     CLASSIFICATION = "classification"
     REGRESSION = "regression"
@@ -600,6 +626,20 @@ class ModelConfig:
         "seed": 42,
     })
 
+    # -- CORN-MLP (ordinal MLP using coral-pytorch) --
+    # Neural ordinal classifier; brings ordinal-aware error pattern from a
+    # non-tree architecture. ~80 epochs on CPU is ~10 min per fold.
+    coral_mlp_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "hidden_sizes": [256, 128, 64],
+        "dropout": 0.2,
+        "max_epochs": 80,
+        "patience": 12,
+        "batch_size": 1024,
+        "lr": 1e-3,
+        "weight_decay": 1e-4,
+        "seed": 42,
+    })
+
 
 @dataclass
 class FeatureEngineeringConfig:
@@ -853,6 +893,7 @@ class Config:
             (TaskType.REGRESSION, "tabnet"): self.models.tabnet_reg_params,
             (TaskType.CLASSIFICATION, "ft_transformer"): self.models.ft_transformer_clf_params,
             (TaskType.REGRESSION, "ft_transformer"): self.models.ft_transformer_reg_params,
+            (TaskType.CLASSIFICATION, "coral_mlp"): self.models.coral_mlp_clf_params,
         }
         key = (task, model)
         if key not in param_map:
@@ -877,6 +918,7 @@ class Config:
             (TaskType.REGRESSION, "tabnet"): self.models.tabnet_reg_params,
             (TaskType.CLASSIFICATION, "ft_transformer"): self.models.ft_transformer_clf_params,
             (TaskType.REGRESSION, "ft_transformer"): self.models.ft_transformer_reg_params,
+            (TaskType.CLASSIFICATION, "coral_mlp"): self.models.coral_mlp_clf_params,
         }
         key = (task, component_name)
         if key not in param_map:

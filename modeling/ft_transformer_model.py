@@ -101,12 +101,14 @@ class FTTransformerModel(BaseModel):
         X: np.ndarray,
         y: Optional[np.ndarray],
         shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
     ):
         n = len(X)
         idx = np.arange(n)
         if shuffle:
-            rng = np.random.default_rng(self._seed)
-            rng.shuffle(idx)
+            if rng is None:
+                rng = np.random.default_rng(self._seed)
+            idx = rng.permutation(n)
         for start in range(0, n, self._batch_size):
             sel = idx[start : start + self._batch_size]
             x_batch = torch.from_numpy(X[sel]).to(self._device)
