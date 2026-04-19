@@ -26,6 +26,18 @@ try:
 except ImportError:
     _TABNET_AVAILABLE = False
 
+try:
+    from modeling.ft_transformer_model import FTTransformerModel
+    _FT_AVAILABLE = True
+except ImportError:
+    _FT_AVAILABLE = False
+
+try:
+    from modeling.coral_mlp_model import CoralMLPModel
+    _CORAL_AVAILABLE = True
+except ImportError:
+    _CORAL_AVAILABLE = False
+
 # Register all available models here
 MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
     "xgboost": XGBoostModel,
@@ -38,6 +50,10 @@ MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
 }
 if _TABNET_AVAILABLE:
     MODEL_REGISTRY["tabnet"] = TabNetModel
+if _FT_AVAILABLE:
+    MODEL_REGISTRY["ft_transformer"] = FTTransformerModel
+if _CORAL_AVAILABLE:
+    MODEL_REGISTRY["coral_mlp"] = CoralMLPModel
 
 
 def model_factory(config: Config) -> BaseModel:

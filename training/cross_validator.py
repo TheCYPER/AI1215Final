@@ -216,3 +216,19 @@ class CrossValidator:
             out_dir=f"{self.config.paths.output_dir}/analysis",
             n_classes=self.config.training.n_classes,
         )
+
+        # Persist raw OOF arrays keyed by current model_type so Step 2
+        # (error correlation) can load every base's predictions later.
+        import os
+        model_type = self.config.models.clf_model_type
+        oof_dir = os.path.join(self.config.paths.output_dir, "oof")
+        os.makedirs(oof_dir, exist_ok=True)
+        oof_path = os.path.join(oof_dir, f"{model_type}.npz")
+        np.savez_compressed(
+            oof_path,
+            y_true=all_true,
+            y_pred=all_pred,
+            y_proba=all_proba,
+            indices=all_indices,
+        )
+        logger.info(f"OOF predictions saved to {oof_path}")
