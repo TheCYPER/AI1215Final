@@ -102,3 +102,34 @@ a truly non-tree base. Row #41 is the first attempt — CORN-MLP (coral-pytorch
 diversity". The only reliable levers are (a) fundamentally different base
 architecture families, (b) data-partitioning/gating by confidence. Keep
 stacking more trees/variants of trees stops helping past ~Q=0.95.
+
+## Infra — 2026-04-22 (Transformer import)
+
+Ported a teammate's (`Lizhengxi25/ai1215_gp`) dual-task TabularTransformer
+into our `BaseModel` registry. Three new files under `modeling/`:
+
+- `_tabular_transformer.py` — pure `nn.Module` backbone (FT-Transformer:
+  feature-token embeddings, MHSA, pre-norm FFN, CLS/mean pooling). Supports
+  four numerical-embedding variants (`numerical` / `periodic` / `ple` /
+  `linear`) and an optional CORN ordinal head for classification.
+- `_ordinal_heads.py` — teammate's CORN `loss` / `decode` / `class_probs`,
+  dependency-free (we keep `coral_pytorch` for `CoralMLPModel` but
+  the Transformer now has its own copy so it stays importable).
+- `tabular_transformer_model.py` — sklearn-style wrapper implementing
+  `fit` / `predict` / `predict_proba`. Auto-detects cat columns from the
+  `categorical_feature` kwarg our `CrossValidator` already passes. Scales
+  only the numeric columns; cat columns stay integer-coded so embedding
+  lookups work. Regression target is standardized inside `fit()`; `predict`
+  inverts. CUDA preferred, falls back to CPU (MPS is skipped — torch 2.11
+  on macOS produces NaN probabilities through our attention path).
+
+Registered as `tabular_transformer` in `MODEL_REGISTRY`. `configs/config.py`
+gets clf / reg params dicts (teammate defaults: `d_model=128, n_layers=2,
+dropout=0.15, lr=9e-4 cls / 7e-4 reg, CORN head on for cls`) and Optuna
+search spaces that mirror their `IDEAS.md`.
+
+Smoke test `scripts/smoke_tabular_transformer.py` fits / predicts on a
+500-row sample in ~1 s on CPU with `d_model=32, n_layers=1, max_epochs=2`
+and validates shape + proba row-sum for both tasks. Full 5-fold CV is
+deferred — our local hardware can't run the real config in reasonable
+time; intended runtime is Kaggle/Colab GPU.
