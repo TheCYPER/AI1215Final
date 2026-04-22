@@ -293,6 +293,67 @@ def pure_tabnet_stacking_components() -> List[Dict[str, Any]]:
     return components
 
 
+def pure_tabnet_reg_stacking_components() -> List[Dict[str, Any]]:
+    """12 TabNet regression bases: 8 widened-tuned-seed-jittered + 3 wild + 1 baseline.
+
+    Mirrors pure_tabnet_stacking_components (cls SOTA row #30) but for
+    regression. Tuned base uses row #43 widened-Optuna best_params
+    (n_d=32, n_steps=9, gamma=2.41, lambda_sparse=0.044, patience=37),
+    which hit 3-fold r2=0.8349 as single model.
+
+    Key uncertainty — cls SOTA path may NOT port to reg:
+    - Single TabNet reg is the WEAKEST strong model (5-fold r2=0.8272).
+    - Reg meta features are scalar (12-dim) vs cls proba (60-dim) —
+      Ridge meta has much less to work with than LogReg meta had on cls.
+    - Row #44 already showed same-family reg stacking fails (30 CatBoost
+      averaged to single-model baseline).
+
+    If this works despite those headwinds it's because NN random init
+    still gives decorrelation trees don't have. If it doesn't, we know
+    reg really does need heterogeneous architectures.
+    """
+    _TABNET_TUNED = {
+        "n_d": 32, "n_a": 19, "n_steps": 9, "gamma": 2.41,
+        "lambda_sparse": 0.044, "max_epochs": 146, "patience": 37,
+        "batch_size": 1587, "virtual_batch_size": 128, "verbose": 0,
+    }
+    _WILD_CONFIGS = [
+        {  # wide + shallow attention
+            "n_d": 48, "n_a": 48, "n_steps": 3, "gamma": 1.5,
+            "lambda_sparse": 0.001, "max_epochs": 100, "patience": 15,
+            "batch_size": 512, "virtual_batch_size": 64, "verbose": 0,
+            "seed": 300,
+        },
+        {  # narrow + deep attention
+            "n_d": 16, "n_a": 16, "n_steps": 8, "gamma": 2.0,
+            "lambda_sparse": 0.01, "max_epochs": 130, "patience": 20,
+            "batch_size": 2048, "virtual_batch_size": 256, "verbose": 0,
+            "seed": 301,
+        },
+        {  # row #42 narrow-tuned (shallower + less sparse)
+            "n_d": 8, "n_a": 15, "n_steps": 4, "gamma": 1.95,
+            "lambda_sparse": 0.0099, "max_epochs": 122, "patience": 24,
+            "batch_size": 1024, "virtual_batch_size": 128, "verbose": 0,
+            "seed": 302,
+        },
+    ]
+    _BASELINE = {
+        "n_d": 16, "n_a": 16, "n_steps": 4, "gamma": 1.3,
+        "lambda_sparse": 1e-3, "max_epochs": 100, "patience": 15,
+        "batch_size": 1024, "virtual_batch_size": 128, "verbose": 0,
+        "seed": 999,
+    }
+    components: List[Dict[str, Any]] = []
+    for i in range(8):
+        overrides = dict(_TABNET_TUNED)
+        overrides["seed"] = 100 + i
+        components.append({"type": "tabnet", "overrides": overrides})
+    for cfg in _WILD_CONFIGS:
+        components.append({"type": "tabnet", "overrides": dict(cfg)})
+    components.append({"type": "tabnet", "overrides": dict(_BASELINE)})
+    return components
+
+
 def tabnet_plus_coral_components(n_coral: int = 3) -> List[Dict[str, Any]]:
     """Config F + N CORN-MLP variants. Tests whether CORN-MLP (acc 0.8373,
     Q=0.938 vs TabNet) can lift the 0.8687 SOTA when meta-learner sees both
