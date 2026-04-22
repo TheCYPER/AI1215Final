@@ -701,6 +701,56 @@ class ModelConfig:
         "seed": 42,
     })
 
+    # -- TabularTransformer (FT-Transformer-style, ported from teammate) --
+    # Classification defaults track the teammate's train.py CLI defaults
+    # (seed=42, max-epochs=100, patience=15, lr=9e-4, d_model=128). We set
+    # `use_ordinal=True` to get CORN training out-of-the-box — single-model
+    # classification on this dataset benefits from the ordinal structure.
+    tabular_transformer_clf_params: Dict[str, Any] = field(default_factory=lambda: {
+        "d_model": 128,
+        "n_heads": 4,
+        "n_layers": 2,
+        "d_ff": 256,
+        "dropout": 0.15,
+        "num_embedding_type": "numerical",
+        "use_cls_token": True,
+        "pooling": "cls",
+        "pre_norm": True,
+        "use_column_embedding": False,
+        "use_ordinal": True,
+        "max_epochs": 100,
+        "patience": 15,
+        "batch_size": 256,
+        "lr": 9e-4,
+        "weight_decay": 1e-4,
+        "grad_clip": 1.0,
+        "seed": 42,
+    })
+
+    # Regression defaults track the teammate's regression/train.py CLI defaults
+    # (lr=7e-4, huber_delta=1.0). Target standardization happens inside the
+    # wrapper; caller sees raw-space predictions.
+    tabular_transformer_reg_params: Dict[str, Any] = field(default_factory=lambda: {
+        "d_model": 128,
+        "n_heads": 4,
+        "n_layers": 2,
+        "d_ff": 256,
+        "dropout": 0.15,
+        "num_embedding_type": "numerical",
+        "use_cls_token": True,
+        "pooling": "cls",
+        "pre_norm": True,
+        "use_column_embedding": False,
+        "max_epochs": 100,
+        "patience": 15,
+        "batch_size": 256,
+        "lr": 7e-4,
+        "weight_decay": 1e-4,
+        "grad_clip": 1.0,
+        "huber_delta": 1.0,
+        "seed": 42,
+    })
+
 
 @dataclass
 class FeatureEngineeringConfig:
@@ -894,6 +944,36 @@ class HyperparameterTuningConfig:
         "patience": (10, 25),
     })
 
+    # TabularTransformer search space — mirrors the teammate's Optuna ranges:
+    # d_model {64, 128, 192, 256}, n_heads {4, 8} auto-fixed for divisibility,
+    # n_layers [2, 4], d_ff {128, 256, 512}, dropout [0.05, 0.30].
+    # lr / weight_decay log-scaled. `num_embedding_type` categorical.
+    tabular_transformer_clf_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "d_model": (64, 256),
+        "n_heads": (4, 8),
+        "n_layers": (2, 4),
+        "d_ff": (128, 512),
+        "dropout": (0.05, 0.30),
+        "lr": (1e-4, 3e-3),
+        "weight_decay": (1e-6, 1e-3),
+        "batch_size": (128, 512),
+        "max_epochs": (40, 120),
+        "patience": (8, 20),
+    })
+    tabular_transformer_reg_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        "d_model": (64, 256),
+        "n_heads": (4, 8),
+        "n_layers": (2, 4),
+        "d_ff": (128, 512),
+        "dropout": (0.05, 0.30),
+        "lr": (1e-4, 3e-3),
+        "weight_decay": (1e-6, 1e-3),
+        "batch_size": (128, 512),
+        "max_epochs": (40, 120),
+        "patience": (8, 20),
+        "huber_delta": (0.5, 2.0),
+    })
+
 
 @dataclass
 class Config:
@@ -955,6 +1035,8 @@ class Config:
             (TaskType.CLASSIFICATION, "ft_transformer"): self.models.ft_transformer_clf_params,
             (TaskType.REGRESSION, "ft_transformer"): self.models.ft_transformer_reg_params,
             (TaskType.CLASSIFICATION, "coral_mlp"): self.models.coral_mlp_clf_params,
+            (TaskType.CLASSIFICATION, "tabular_transformer"): self.models.tabular_transformer_clf_params,
+            (TaskType.REGRESSION, "tabular_transformer"): self.models.tabular_transformer_reg_params,
         }
         key = (task, model)
         if key not in param_map:
@@ -980,6 +1062,8 @@ class Config:
             (TaskType.CLASSIFICATION, "ft_transformer"): self.models.ft_transformer_clf_params,
             (TaskType.REGRESSION, "ft_transformer"): self.models.ft_transformer_reg_params,
             (TaskType.CLASSIFICATION, "coral_mlp"): self.models.coral_mlp_clf_params,
+            (TaskType.CLASSIFICATION, "tabular_transformer"): self.models.tabular_transformer_clf_params,
+            (TaskType.REGRESSION, "tabular_transformer"): self.models.tabular_transformer_reg_params,
         }
         key = (task, component_name)
         if key not in param_map:
@@ -1005,6 +1089,8 @@ class Config:
             (TaskType.REGRESSION, "logreg_poly"): self.tuning.logreg_poly_reg_search_space,
             (TaskType.CLASSIFICATION, "tabnet"): self.tuning.tabnet_clf_search_space,
             (TaskType.REGRESSION, "tabnet"): self.tuning.tabnet_reg_search_space,
+            (TaskType.CLASSIFICATION, "tabular_transformer"): self.tuning.tabular_transformer_clf_search_space,
+            (TaskType.REGRESSION, "tabular_transformer"): self.tuning.tabular_transformer_reg_search_space,
         }
         key = (task, model)
         if key not in space_map:

@@ -38,6 +38,12 @@ try:
 except ImportError:
     _CORAL_AVAILABLE = False
 
+try:
+    from modeling.tabular_transformer_model import TabularTransformerModel
+    _TTRF_AVAILABLE = True
+except ImportError:
+    _TTRF_AVAILABLE = False
+
 # Register all available models here
 MODEL_REGISTRY: Dict[str, Type[BaseModel]] = {
     "xgboost": XGBoostModel,
@@ -54,6 +60,8 @@ if _FT_AVAILABLE:
     MODEL_REGISTRY["ft_transformer"] = FTTransformerModel
 if _CORAL_AVAILABLE:
     MODEL_REGISTRY["coral_mlp"] = CoralMLPModel
+if _TTRF_AVAILABLE:
+    MODEL_REGISTRY["tabular_transformer"] = TabularTransformerModel
 
 
 def model_factory(config: Config) -> BaseModel:
